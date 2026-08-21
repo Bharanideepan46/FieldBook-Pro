@@ -584,24 +584,37 @@
 <meta name="fb-build" content="__BUILD_VERSION__">
 <script src="./install-banner.js"></script>
 <script>
-/* PWA: register the offline service worker when app.html is opened directly
-   (self-contained install). No-op inside the index.html iframe (register() is
-   idempotent per scope). Also wires the "new version" update toast. */
+/* PWA service-worker registration — loop-proof.
+   - Reloads exactly ONCE when a new SW takes control (guarded flag).
+   - Only shows the update toast when there is a genuinely WAITING worker
+     AND the page is already controlled (i.e. a real update, not first install).
+   - No FB_SW_UPDATED broadcast handling (that caused an infinite toast loop). */
 if ('serviceWorker' in navigator) {
+  var __fbReloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', function () {
+    if (__fbReloaded) return;
+    __fbReloaded = true;
+    window.location.reload();
+  });
   window.addEventListener('load', function () {
     navigator.serviceWorker.register('./service-worker.js').then(function (reg) {
+      function offerUpdate(sw) {
+        if (!sw) return;
+        // Only a real update: there must already be an active controller.
+        if (!navigator.serviceWorker.controller) return;
+        var apply = function () { sw.postMessage({ type: 'FB_SKIP_WAITING' }); };
+        if (window.fbShowUpdateToast) window.fbShowUpdateToast(apply); else apply();
+      }
+      // A worker may already be waiting from a previous visit.
+      if (reg.waiting) offerUpdate(reg.waiting);
       reg.addEventListener('updatefound', function () {
-        var sw = reg.installing; if (!sw) return;
+        var sw = reg.installing;
+        if (!sw) return;
         sw.addEventListener('statechange', function () {
-          if (sw.state === 'installed' && navigator.serviceWorker.controller && window.fbShowUpdateToast) {
-            window.fbShowUpdateToast(function () { sw.postMessage({ type: 'FB_SKIP_WAITING' }); location.reload(); });
-          }
+          if (sw.state === 'installed') offerUpdate(reg.waiting || sw);
         });
       });
     }).catch(function (e) { console.warn('SW registration failed:', e); });
-    navigator.serviceWorker.addEventListener('message', function (ev) {
-      if (ev.data && ev.data.type === 'FB_SW_UPDATED' && window.fbShowUpdateToast) window.fbShowUpdateToast();
-    });
   });
 }
 </script>
@@ -1561,19 +1574,19 @@ var I18N = {
     auto_token:"(auto)"
   },
   zh: {
-    crash_restored:"✓ 已恢复未保存的内容", gps_off_prompt:"位置服务似乎已关闭。是否打开位置设置？", prog_pptx_start:"正在准备 PowerPoint…", prog_pptx_slides:"正在生成数据幻灯片…", prog_pptx_photos:"正在添加照片…", prog_pptx_finalize:"正在完成幻灯片…", prog_done:"���成", downloaded_to:"✓ {f} 已下载到 {d}", downloaded_generic:"✓ {f} 已下载", share_title:"分享文件", share_hint:"选择要发送的文件，然后选择任意应用（WhatsApp、Gmail、蓝牙…）。", share_send:"分享", share_cancel:"取消", share_none_sel:"请至少选择一个文件。", share_files_btn:"📤 分享��件", share_saved_first:"请先保存文件，然后再分享。", share_need_dl:"请先下载 CSV、Excel 或 PowerPoint，然后再分享。", share_fail:"分享失败",
+    crash_restored:"✓ 已恢复未保存的内容", gps_off_prompt:"位置服务似乎已关闭。是否打开位置设置？", prog_pptx_start:"正在准备 PowerPoint…", prog_pptx_slides:"正在生成数据幻灯片…", prog_pptx_photos:"正在添加照片…", prog_pptx_finalize:"正在完成幻灯片…", prog_done:"���成", downloaded_to:"✓ {f} 已下载到 {d}", downloaded_generic:"✓ {f} 已下载", share_title:"分享文件", share_hint:"选择要发送的文件，然后选择任意应用（WhatsApp、Gmail、蓝牙…）。", share_send:"分享", share_cancel:"取消", share_none_sel:"请至少选择一个文件。", share_files_btn:"📤 分享�����", share_saved_first:"请先保存文件，然后再分享。", share_need_dl:"请先下载 CSV、Excel 或 PowerPoint，然后再分享。", share_fail:"分享失败",
     
     open_folder_btn:'📂 打开存储文件夹', nav_storage:'存储与数据', open_folder_fail:'未设置文件夹或无可用文件管理器', about_storage_label:'存储文件夹', repick_folder:"🔄 更改存储文件夹", storage_autofolder_note:'将在您选择的文件夹内自动创建 "FieldBook Pro" 文件夹。', migrate_q:'是否将现有数据复制到新文件夹？（选择取消则保留旧文件。）', migrate_ok:'✓ 数据已复制到新文件夹', migrate_none:'没有������制的旧数据', applock_label:'应用锁', applock_hint:'打开时需指纹 / 面容 / PIN', applock_on:'✓ 已启用应用锁', applock_off:'已禁用应用锁', applock_unavail:'本设备未设置生物识别或锁屏', saf_not_set:'未设置 — 点击保存操作选择', saf_web_mode:'浏��器（下载���', saf_pick_prompt:'请选择���次 FieldBook Pro 文件夹', saf_pick_ok:'✓ 文件夹已设置 — 文件将保存在此',
     nav_about:'关于', about_title:'ℹ️ 关�� FieldBook Pro', about_what_h:'本应用的功能', about_what:'FieldBook Pro 帮助田间研究人员离线开展农药试验：精确计算喷雾剂量，并在田间逐小区记录观察数据——无需联网。', about_dose_h:'剂量计算', about_dose:'四合一工具：(1) 将 克a.i./公顷 换算为每公顷/英亩和每小区的制剂用量，(2) 毫升/升 与每桶用量，(3) 百分比溶液，(4) ppm 溶液。选择标签、输入数值并点击“计算”——每个结果都会显示答案、��位和��算步骤。面积换算采用 1 公顷 = 2.5 英亩。', about_data_h:'数据采集', about_data:'设置试验（处理、重复、观察项），逐小区记录子样本数据和照片，跟踪进度，查看处理汇总，并将全部数据导出为 CSV 或 Excel。数据���自���保存在本设备上��在 Android 上，备份、CSV/Excel 和原图照片会写入您选择的 FieldBook Pro 文件夹（下载），按试验分类，包含 Raw Data 和 Photos 子文件夹。', about_tips_h:'快速提示', about_tip1:'使用左上角 ☰ 菜单在各部分之间切换。', about_tip2:'随时点击标题栏返回主页。', about_tip3:'用 EN / 中 按钮切换英文和中文。', about_tip4:'完全离线运行。天气 + Excel 首次使用需联网。', about_feat_h:'功能', about_storage_desc:'您的备份、CSV/Excel 文件和原图照片会写入本设备上的 FieldBook Pro 文件夹，按试验分类，包含 Raw Data 和 Photos 子文件夹。', about_ver_h:'版本', about_ver_label:'版��', tm_scroll_hint:'↔ 滑动查看所有小区', wx_fail_prefix:'获取天气失败：', wx_retry_q:'现在重试？',
     card_dose_sub:'5个试验工具 — AI、毫升/升、%、ppm、小区', dz_title:'🧮 农药剂量计算器', dz_sub:'用于田间试验、喷雾配制与����剂量计算。', dz_t1:'AI→制剂', dz_t1s:'每公顷&小区', dz_t2:'毫���/升', dz_t2s:'每桶', dz_t3:'%', dz_t3s:'溶液', dz_t4:'PPM', dz_t4s:'毫克/升', dz_m1_h:'克a.i./公顷 → ��剂与小区', dz_m2_h:'毫升/升 与每桶', dz_m3_h:'百分比溶液', dz_m4_h:'PPM 溶液', dz_dose_ai:'推荐剂量（克a.i./公顷）', dz_strength:'制剂含量', dz_ww:'% w/w — WP/WG/SP', dz_wv:'% w/v — EC/SC/SL', dz_str_h:'% w/w = 克a.i./100克。% w/v = 克a.i./100毫升（20% w/v = 200 克/升）。', dz_show_rate:'显示田间用量', dz_per_ha:'每公顷', dz_per_acre:'每英亩', dz_plot_opt:'可选 — 换算至小区（留空则仅显示田间用量）', dz_plot_area:'小区面积（m²）', dz_spray_vol:'��雾量', dz_prod_dose:'制剂用量', dz_req_conc:'所需喷雾浓度（%）', dz_total_vol:'喷雾总量（L）', dz_form_str_pct:'制剂含量（%）', dz_target_ppm:'目标 ppm', dz_final_vol:'最终喷雾量（L）', dz_calc:'计算', dz_reset:'重置', dz_copy:'复制结果', dz_how:'计算过程', dz_prod_ha:'每公顷制剂量', dz_prod_acre:'每英亩制剂��', dz_field_rate:'田间用量', dz_per_plot:'每小区', dz_prod_plot:'每小区制剂量', dz_water_plot:'每���区用水', dz_conc:'浓度', dz_water:'水', dz_tank:'桶', dz_per_tank2:'每桶', dz_per_l:'每升', dz_total_for:'总量（', dz_total_big:'总量（大单位）', dz_prod_req:'所需制剂量', dz_ai_need:'所需有效成分', dz_form_prod:'制剂产品', dz_small:'用量极小 — 请使用注射器或微量移液器精确量取。', dz_e_enter:'请输入', dz_e_neg:'不能为负。', dz_e_zero:'必须大于零。',
     go_home_q:'返回主页启动器？',
-    cat_dose:'剂量计算', cat_data:'数据采集', nav_dose:'剂��计算器', dose_title:'🧮 剂量计算器', dose_sub:'在制剂用量、有效成分投放量与农户实际做法之间换算。', dose_mA:'模式 A', dose_mA_s:'制剂 → 有效成分', dose_mB:'模式 B', dose_mB_s:'目标有效成分 → 制剂', dose_mC:'模式 C', dose_mC_s:'农户做��� → ���公顷', dose_form_load:'制剂与有效成分含量', dose_form_name:'产品 / 制剂名称', dose_form_ph:'例如 吡虫啉 200 SL', dose_form_type:'制剂类型', dose_liquid:'液剂 (EC/SC/SL) — 克a.i./升', dose_solid:'固剂 (WP/WG/SP/GR) — 重量百分比%', dose_ai_gl:'有效成分含量（克a.i./升产品）', dose_ai_gl_h:'见标签，例如「吡虫啉 200 克/升 SL」→ 200', dose_ai_pct:'有效成分含量（% 重量比）', dose_ai_pct_h:'例如「代森锰锌 75% WP」→ 75，内部相当于 750 克a.i./公斤。', dose_area_vol:'面积与喷雾量', dose_area_basis:'面积单位', dose_per_ha:'每公顷 (ha)', dose_per_acre:'每英亩', dose_per_ha_s:'每公顷', dose_per_acre_s:'每英亩', dose_spray_vol:'喷雾（载体）用水量', dose_spray_h:'每单位面积的总用水量（计算 毫升/升 和每桶用量时需要）。', dose_tank:'药桶 / 喷雾器容量 (L) — 可选', dose_field:'待处理田块面积 — 可选', dose_mA_in:'模式 A — 已施用的制剂���', dose_form_rate:'制剂用量', dose_mA_h:'输入每公顷/英亩实际���用量，计算投放的有效成分克数。', dose_mB_in:'模式 B — 目���有��成分用量', dose_target_ai:'目标有效成分用量', dose_mB_h:'输入推荐的每公顷/英亩 克a.i.，计算所需制剂量。', dose_mC_in:'模式 C — 农户实际做法', dose_farmer_conc:'农户配比浓度', dose_mC_h:'「我每升用 2.5 毫升。」需要上方喷雾量来计算每公顷实际投放量。', dose_fill:'填写参数即可查看结果…', dose_copy:'复制结果', dose_ai_delivered:'投放有效成分', dose_from:'来自', dose_ai_other:'投放有效成分', dose_conc:'药桶内浓度', dose_per_tank:'每 {n} L 桶', dose_total_prod:'{a} {u} 所需产品用量', dose_total_ai:'有效成分总量', dose_total_water:'总用水量', dose_form_needed:'所需制剂量', dose_for_target:'以达到目标', dose_area_per_tank:'每桶可覆盖面积', dose_tanks_needed:'所需桶数', dose_true_form:'实际制剂用量', dose_cannot:'暂时无法计算', dose_note:'提示', dose_w_ai:'请输入有效���分含量（克/升 或 %）。', dose_w_vol:'添加喷雾量以计��� 毫升/升 及每桶用量。', dose_w_vol_c:'请输入喷雾量（升/公顷）— 模式C需用它将 毫升/升 换算为每单位面积用量。', dose_w_ai_opt:'添加有效成分含量即可同时显示投放的有效成分克数。', dose_copied:'已复制到剪贴板', dose_copy_fail:'复制失败',
+    cat_dose:'剂量计算', cat_data:'数据采集', nav_dose:'剂��计算器', dose_title:'🧮 剂量计算器', dose_sub:'在制剂用量、有效成分投放量与农户实际做法之间换算。', dose_mA:'模式 A', dose_mA_s:'制剂 → 有效成分', dose_mB:'模式 B', dose_mB_s:'目标有效成分 → 制剂', dose_mC:'模式 C', dose_mC_s:'农���做��� → ���公顷', dose_form_load:'制剂与有效成分含量', dose_form_name:'产品 / 制剂名称', dose_form_ph:'例如 吡虫啉 200 SL', dose_form_type:'制剂类型', dose_liquid:'液剂 (EC/SC/SL) — 克a.i./升', dose_solid:'固剂 (WP/WG/SP/GR) — 重量百分比%', dose_ai_gl:'有效成分含量（克a.i./升产品）', dose_ai_gl_h:'见标签，例如「吡虫啉 200 克/升 SL」→ 200', dose_ai_pct:'有效成分含量（% 重量比）', dose_ai_pct_h:'例如「代森锰锌 75% WP」→ 75，内部相当于 750 克a.i./公斤。', dose_area_vol:'面积与喷雾量', dose_area_basis:'面积单位', dose_per_ha:'每公顷 (ha)', dose_per_acre:'每英亩', dose_per_ha_s:'每公顷', dose_per_acre_s:'每英亩', dose_spray_vol:'喷雾（载体）用水量', dose_spray_h:'每单位面积的总用水量（计算 毫升/升 和每桶用量时需要）。', dose_tank:'药桶 / 喷雾器容量 (L) — 可选', dose_field:'待处理田块面积 — 可选', dose_mA_in:'模式 A — ���施用的制剂���', dose_form_rate:'制剂用量', dose_mA_h:'输入每公顷/英亩实际���用量，计算投放的有效成分克数。', dose_mB_in:'模式 B — 目���有��成分用量', dose_target_ai:'目标有效成分用量', dose_mB_h:'输入推荐的每公顷/英亩 克a.i.，计算所需制剂量。', dose_mC_in:'模式 C — 农户实际做法', dose_farmer_conc:'农户配比浓度', dose_mC_h:'「我每升用 2.5 毫升。」需要上方喷���量来计算每公顷实际投放量。', dose_fill:'填写参数即可查看结果…', dose_copy:'复制结果', dose_ai_delivered:'投放有效成分', dose_from:'来自', dose_ai_other:'投放有效成分', dose_conc:'药桶内浓度', dose_per_tank:'每 {n} L 桶', dose_total_prod:'{a} {u} 所需产品用量', dose_total_ai:'有效成分总量', dose_total_water:'总用水量', dose_form_needed:'所需制剂量', dose_for_target:'以达到目标', dose_area_per_tank:'每桶可覆盖面积', dose_tanks_needed:'所需桶数', dose_true_form:'实际制剂用量', dose_cannot:'暂时无法计算', dose_note:'提示', dose_w_ai:'请输入有效���分含量（克/升 或 %）。', dose_w_vol:'添加喷雾量以计��� 毫升/升 及每桶用量。', dose_w_vol_c:'请输入喷雾量（升/公顷）— 模式C需用它将 毫升/升 换算为每单位面积用量。', dose_w_ai_opt:'添加有效成分含量即可同时显示投放的有效成分克数。', dose_copied:'已复制到剪贴板', dose_copy_fail:'复制失败',
     nav_home:'主页', home_title:'您想做什么？', home_sub:'在下方选择一个工具，随时点击菜单快速跳转。', menu:'菜单', card_setup_sub:'试验信息、设计、地图、观察项', card_entry_sub:'记录子样本数据和照片', card_prog_sub:'跟踪各小区完成情况', card_sum_sub:'按处理统计均值与药效', card_exp_sub:'CSV、Excel、天气、备份', card_home_sub:'返回启动页',
     recent_files:'最近文件', recent_none:'暂无已保存文件', recent_open_fail:'无法打开文件', recent_opened:'���� 已打开 {n}',
     ph_protocol:'例如 PROT-2026-001', ph_trial:'例如 T-001', ph_crop:'例如 水稻 IR-64', ph_product:'产品名称', ph_pest:'例如 ��飞虱', ph_location:'田块 / 地点名称', ph_soil:'例如 黏壤土',
     app_title:"田间记录专业版",
     developer:"应用程序开发者：A. Bharanideepan",
-    nav_setup:"设置", nav_entry:"录入", nav_progress:"进度", nav_summary:"汇总", nav_export:"导出",
+    nav_setup:"设置", nav_entry:"录入", nav_progress:"进度", nav_summary:"汇总", nav_export:"���出",
     trial_info:"试验信息", protocol:"方案编号", trial_number:"试验编号",
     crop_variety:"作物 / 品种", product:"产品", target_pest:"目标害虫",
     location:"地点", soil_type:"土壤类型",
@@ -1587,7 +1600,7 @@ var I18N = {
     gps_set:"已设", gps_na:"不可用", gps_denied:"权限被拒绝", gps_unavail:"不可用",
     gps_corners_title:"田块四角", gps_corner_hint:"走到每个角，选择该角，然后点击获取 GPS。",
     corner_tl:"左上", corner_tr:"右上", corner_bl:"左下", corner_br:"右下",
-    gps_corner_set:"✓ 已获取{c}", gps_center:"田块中心", gps_corners_done:"{n}/4 个角", gps_capture_corner:"📍 获取{c}",
+    gps_corner_set:"✓ 已获取{c}", gps_center:"田块中���", gps_corners_done:"{n}/4 个角", gps_capture_corner:"📍 获取{c}",
     alt:"海拔",
     trial_design:"试验设计", treatments:"处理数",
     utc_label:"对照 (UTC) 处理号", plots:"小区",
@@ -1600,10 +1613,10 @@ var I18N = {
     walk_pattern:"田间��走方式",
     walk_normal:"普通 (所有行 左→右)",
     walk_serp:"蛇形 (来回)",
-    map_tips_html:"💡 <b>提示：</b><br>• <b>随机化</b>对 ARM 与 T-R 编号模式均有效<br>• <b>蛇形</b>会反转隔行重复，使小区编号沿田间行走路径排列<br>• 在同一重复内 <b>拖动</b>任意单元格可自由调整顺序<br>• <b>点击</b>单元格可将其设为当前数据录入小区",
+    map_tips_html:"💡 <b>提示：</b><br>• <b>随机化</b>对 ARM 与 T-R 编号模式均有效<br>• <b>蛇形</b>会反转隔行重复，使小区编号沿田间行走路径排列<br>• 在同一重复内 <b>拖动</b>任意单元格可自由调整顺序<br>• <b>点击</b>单元格可将其设为当前数据录入���区",
     map_preview:"地图预览",
     map_fit:"适应宽度", map_zoom:"放大",
-    an_settings:"分析设置", an_metrics:"显示指标", an_base:"比较基准", an_base_utc:"UTC（默认）", an_base_trt:"选择处理", an_cmp:"待比较处理", an_dsimax:"DSI最大级", an_moist_std:"标准水分%", an_moist_harvest:"收���水分%", an_yield_basis:"产量换算基准", an_by_area:"按面积", an_by_plants:"按株数", an_obs_area:"观测面积 (m²)", an_target_basis:"目标基准", an_ha:"每公顷", an_acre:"每英亩", an_nplants_obs:"观测株数", an_nplants_target:"每公��/英亩株数", an_manual:"自定义公式", an_manual_hint:"变量：T=处理均值, C=对照均值, Rw=原���, Ha=收获%, Hs=标准%, A=面��。函数：min,max,abs,sqrt,ln,log,exp。例：(C-T)/C*100", an_src:"来源观测", m_redUTC:"较对照下降%", m_incUTC:"较对照增加%", m_wceCount:"除草效率(密度)", m_wceDM:"除草效率(生物量)", m_dsi:"病情指数", m_moist:"水分校正", m_yieldha:"产量/公顷或/英亩", m_manual:"自定义公式", an_sheet:"分析汇总",
+    an_settings:"分析设置", an_metrics:"显示指标", an_base:"比较基准", an_base_utc:"UTC（默认）", an_base_trt:"选择处理", an_cmp:"待比较处理", an_dsimax:"DSI最大级", an_moist_std:"标准水分%", an_moist_harvest:"收���水分%", an_yield_basis:"产量换算基准", an_by_area:"按面积", an_by_plants:"按株数", an_obs_area:"观测面积 (m²)", an_target_basis:"目标基准", an_ha:"每��顷", an_acre:"每英亩", an_nplants_obs:"观测株数", an_nplants_target:"每公��/英亩株数", an_manual:"自定义公式", an_manual_hint:"变量：T=处理均值, C=对照均值, Rw=原���, Ha=收获%, Hs=标准%, A=面��。函数：min,max,abs,sqrt,ln,log,exp。例：(C-T)/C*100", an_src:"来源观测", m_redUTC:"较对照下降%", m_incUTC:"较对照增加%", m_wceCount:"除草效率(密度)", m_wceDM:"除草效率(生物量)", m_dsi:"病情指数", m_moist:"水分校正", m_yieldha:"产量/公顷或/英亩", m_manual:"自定义公式", an_sheet:"分析汇总",
     dl_pptx:"📽 PPTX", pptx_missing:"PptxGenJS 未加载 - 请检查网络", pptx_done:"✓ PowerPoint 已下载", pptx_report_sub:"田间试验报告", pptx_slide_obs:"观测", pptx_base:"比较基准", pptx_map:"试验小区图", pptx_weather:"天气", pptx_photos:"照片",
     ph_retake:"重拍", ph_delete:"删除", ph_done:"完成",
     gps_map_title:"田块地图", gps_open_map:"🗺️ 在地图中打开", gps_map_hint:"在地图应用中核实捕获的位置。",
@@ -1625,7 +1638,7 @@ var I18N = {
     plot_legend:"— 绿色=完成，红色=待录",
     active_plot:"当前小区",
     ready:"就绪", done:"完成", active:"进���中", pending:"待��",
-    quick_fill:"⚡ 快速填充：", ph_value:"数值", fill_all:"全部填充", filled_cells:"✓ 已用 {v} 填充 {n} 个单元", enter_value_first:"请先输入数值", dup_overwrite:"该小区在当前观察/时间点已有数据。是否覆盖？",
+    quick_fill:"⚡ 快速填充：", ph_value:"数值", fill_all:"全部填充", filled_cells:"✓ 已用 {v} 填充 {n} 个单元", enter_value_first:"请先输入数值", dup_overwrite:"该小区在当前观察/时间点已有数据��是否覆盖？",
     data_columns:"数据列", add_column:"添加列", remove_column:"删除列", col_default_name:"列 1", col_new_name:"列", col_single_hint:"单数值列。点击 ＋ 添加列可在每个子样本记录多项测量（如小幼虫、大幼虫）。", col_name_ph:"列名称", col_delete_q:"删除列“{c}”及其在本观察项的数据？", all_columns:"所有列",
     columns_short:"数据列", col_name_prompt:"为此测量列命名：", col_added:"✓ 已添加列“{c}”", col_removed:"已删除列“{c}”", col_tap_rename:"点击重命名",
     plot:"小区", sub:"子样", subsample:"子样本", value:"数值", mean:"平均", sum_total:"合计 (总和)：",
@@ -1656,7 +1669,7 @@ var I18N = {
     randomized_ok:"✓ 布局已随机化",
     reset_confirm:"重置为顺序布局 (T1, T2, T3…)？",
     layout_reset:"✓ 布局已重置",
-    apps_count:"次施药", apps_count_pl:"次施药", no_app_dates:"暂无施药日期",
+    apps_count:"��施药", apps_count_pl:"次施药", no_app_dates:"暂无施药日期",
     date_saved:"✓ 日期已保存",
     export_data:"导出数����", email:"邮箱", dl_csv:"📤 校验并下载 CSV",
     dl_xlsx:"📊 校验并下载 ARM Excel (.xlsx)", email_csv:"���� 邮件发送 CSV",
@@ -1667,10 +1680,10 @@ var I18N = {
     v_obs_int:"{no} ��观察 × {nt} 个时间点",
     val_warnings:"警告", val_none:"✅ 无警告 — 所有必填项已完成！",
     v_proto:"���设��方案编号", v_trial:"未设置试验编号", v_crop:"未设置作物/品种",
-    v_loc:"未设置地点", v_sow:"未设置播种日��", v_gps:"未获取 GPS",
+    v_loc:"未设置地点", v_sow:"未设置播种日����", v_gps:"未获取 GPS",
     v_no_data:"以下小区无数据：", v_partial:"个小区数据不完整",
     v_oor:"发现异常数值",
-    completeness:"完整度", warnings:"个警告", all_inc:"不完整数据将以空白单元格导出。", download_q:"仍要下载吗？",
+    completeness:"完整度", warnings:"个警��", all_inc:"不完整数据将以空白单元格导出。", download_q:"仍要下载吗？",
     fetching_wx:"获取天气中…",
     csv_done_wx:"✓ CSV 已下载 (天气：{n} 天)",
     csv_done_nowx:"✓ CSV 已下载 (无天气：{e})",
@@ -1682,7 +1695,7 @@ var I18N = {
     mail_subject:"田间记录数据", mail_body:"CSV 已附上。",
     sel_json:"请选择 .json 或 .csv 文件", replace_all_q:"替换全部当前数据？", restored:"✓ 已恢复", invalid_file:"文件无��",
     clear_all_q:"这将���除全部数据！\\n将先���载备份。是否继续？", cleared_ok:"✓ 已清除全部数据。已保存备份。", backup_dl:"💾 备份已下载",
-    voice_label:"语音", voice_failed:"语音不可用，请手动输入：", enter_value:"输入数值：",
+    voice_label:"语音", voice_failed:"��音不可用，请手动输入：", enter_value:"输入数值：",
     xlsx_info_sheet:"试验信息", xlsx_field:"字段", xlsx_value:"值", xlsx_plot:"小区", xlsx_subsample:"子样本",
     wx_sheet:"天气 (日)",
     ti_protocol:"方案编号", ti_trial:"试验编号", ti_crop:"作物/品种",
@@ -1693,7 +1706,7 @@ var I18N = {
     ti_trts:"处理数", ti_reps:"重复数", ti_utc:"对照 (UTC) 处理号",
     ti_app_dates:"施药日期",
     ti_pm:"小���编号��式", pm_arm_label:"ARM (重复×100+位置)", pm_tr_label:"T-R (��理×重复)",
-    ti_walk:"田��行走", walk_serp_label:"蛇形", walk_norm_label:"普通 (左→右)",
+    ti_walk:"田�����走", walk_serp_label:"蛇形", walk_norm_label:"普通 (左→右)",
     ti_export_date:"导出日期",
     ti_obs_hdr:"观察项", ti_subs_hdr:"子样本数",
     ti_intervals:"调查时间点", ti_trt_hdr:"处理", ti_label_hdr:"标签",
@@ -1712,7 +1725,7 @@ var I18N = {
     wx_refetch:"🔄️ 重新获取天气",
     wx_fetched:"🌤️ 天气已获取",
     wx_clear_confirm:"清除全部已缓存的天气���据？",
-    wx_cleared_msg:"🗑�� 已清除 {n} 条缓存天气数据",
+    wx_cleared_msg:"����� 已清除 {n} 条缓存天气数据",
     wx_cache_cleared:"✓ 天气缓存已清除",
     wx_need_inputs:"需要 GPS + 播种日期 + 时间点/施药日期才能获取。",
     wx_date:"日期",
@@ -1779,7 +1792,7 @@ var I18N = {
     wx_idle:"Aún no se obtuvo el clima. Use 📤 Exportar para obtenerlo automáticamente.",
     wx_idle_btn:"Aún no se obtuvo el clima. Toque el botón de arriba para obtenerlo.",
     fetch_wx_now:"🌤️ Obtener clima ahora (vista previa)",
-    clear_wx_cache:"🗑️ Borrar clima en caché",
+    clear_wx_cache:"���️ Borrar clima en caché",
     trt_labels:"Etiquetas de tratamiento", label_ph:"Etiqueta / nombre del tratamiento",
     observations:"Observaciones", ph_add_obs:"Agregar observación",
     assessment_intervals:"Intervalos de evaluación", ph_add_tp:"ej. 3DAA1",
@@ -2363,7 +2376,7 @@ var I18N = {
     auto_token:"(otomatis)"
   },
   vi: {
-    crash_restored:"✓ Đã khôi phục dữ liệu chưa lưu", gps_off_prompt:"Vị trí có vẻ đang tắt. Mở cài đặt vị trí để bật?", prog_pptx_start:"Đang chuẩn bị PowerPoint…", prog_pptx_slides:"Đang tạo trang dữ liệu…", prog_pptx_photos:"Đang th��m ảnh…", prog_pptx_finalize:"Đang hoàn tất trang…", prog_done:"Xong", downloaded_to:"✓ Đã tải {f} vào {d}", downloaded_generic:"✓ Đã tải {f}", share_title:"Chia sẻ tệp", share_hint:"Chọn tệp rồi chọn ứng dụng bất kỳ (WhatsApp, Gmail, Bluetooth…).", share_send:"Chia sẻ", share_cancel:"Hủy", share_none_sel:"Chọn ít nhất một tệp để chia sẻ.", share_files_btn:"📤 Chia sẻ tệp", share_saved_first:"Hãy lưu tệp trư���c, rồi chia sẻ.", share_need_dl:"Hãy tải CSV, Excel hoặc PowerPoint trước, rồi chia sẻ.", share_fail:"Chia sẻ thất bại",
+    crash_restored:"✓ Đã khôi phục dữ liệu chưa lưu", gps_off_prompt:"Vị trí có vẻ đang tắt. Mở cài đặt vị trí để bật?", prog_pptx_start:"Đang chuẩn bị PowerPoint…", prog_pptx_slides:"Đang tạo trang dữ liệu…", prog_pptx_photos:"Đang th��m ảnh…", prog_pptx_finalize:"Đang hoàn tất trang…", prog_done:"Xong", downloaded_to:"✓ Đã tải {f} vào {d}", downloaded_generic:"✓ Đã tải {f}", share_title:"Chia sẻ tệp", share_hint:"Ch��n tệp rồi chọn ứng dụng bất kỳ (WhatsApp, Gmail, Bluetooth…).", share_send:"Chia sẻ", share_cancel:"Hủy", share_none_sel:"Chọn ít nhất một tệp để chia sẻ.", share_files_btn:"📤 Chia sẻ tệp", share_saved_first:"Hãy lưu tệp trư���c, rồi chia sẻ.", share_need_dl:"Hãy tải CSV, Excel hoặc PowerPoint trước, rồi chia sẻ.", share_fail:"Chia sẻ thất bại",
     
     open_folder_btn:"📂 Mở thư mục lưu trữ",
     nav_storage:"Lưu trữ & dữ liệu",
@@ -2477,7 +2490,7 @@ var I18N = {
     dose_form_type:"Loại chế phẩm",
     dose_liquid:"Lỏng (EC/SC/SL) — g HC mỗi lít",
     dose_solid:"Rắn (WP/WG/SP/GR) — % kl/kl",
-    dose_ai_gl:"Tải HC (g HC / lít sản phẩm)",
+    dose_ai_gl:"Tải HC (g HC / lít sản ph���m)",
     dose_ai_gl_h:"Trên nhãn, vd. \"Imidacloprid 200 g/L SL\" → 200",
     dose_ai_pct:"Hàm lượng HC (% kl/kl)",
     dose_ai_pct_h:"vd. \"Mancozeb 75% WP\" → 75. Nội bộ = 750 g HC/kg.",
@@ -2518,7 +2531,7 @@ var I18N = {
     dose_cannot:"Chưa thể tính",
     dose_note:"Ghi chú",
     dose_w_ai:"Nhập tải HC (g/L hoặc %).",
-    dose_w_vol:"Thêm lượng nước phun để có ml/L và liều mỗi bình.",
+    dose_w_vol:"Thêm lượng nư��c phun để có ml/L và liều mỗi bình.",
     dose_w_vol_c:"Nhập lượng nước phun (L/ha) — Chế độ C cần để đổi ml/L thành liều theo diện tích.",
     dose_w_ai_opt:"Thêm tải HC để cũng thấy g HC đã cấp.",
     dose_copied:"Đã sao chép vào bộ nhớ tạm",
@@ -2535,7 +2548,7 @@ var I18N = {
     card_home_sub:"Về màn hình khởi động",
     recent_files:"Tệp gần đây",
     recent_none:"Chưa có tệp đã lưu",
-    recent_open_fail:"Không thể mở tệp",
+    recent_open_fail:"Không th�� mở tệp",
     recent_opened:"✅ Đã mở {n}",
     ph_protocol:"vd. PROT-2026-001",
     ph_trial:"vd. T-001",
@@ -2559,7 +2572,7 @@ var I18N = {
     target_pest:"Dịch hại mục tiêu",
     location:"Đ���a điểm",
     soil_type:"Lo���i đất",
-    dates:"Ng��y tháng",
+    dates:"Ng��y th��ng",
     sowing_date:"Ngày gieo / cấy",
     sowing_hint:"NST/NTT tự động tính từ ngày này",
     app_dates:"Ngày phun thuốc",
@@ -2609,7 +2622,7 @@ var I18N = {
     ph_retake:"Chụp lại", ph_delete:"Xóa", ph_done:"Xong",
     gps_map_title:"Bản đồ ruộng", gps_open_map:"🗺️ Mở trong Bản đồ", gps_map_hint:"Kiểm tra vị trí đã ghi trong ứng dụng bản đồ.",
     wx_src_cma:"Cục Khí tượng Trung Quốc", wx_src_openmeteo:"Open-Meteo (ERA5)", auth_create_h:"Tạo hồ sơ của bạn", auth_name_ph:"Tên của bạn", auth_org_ph:"Tổ chức (tùy chọn)", auth_pin_ph:"PIN (4-8 chữ số)", auth_create_btn:"Tạo hồ sơ", auth_welcome:"Chào mừng trở lại", auth_signin_btn:"Đăng nhập", auth_bio_btn:"🔑 Dùng sinh trắc học", auth_local_note:"Chỉ lưu trên thiết bị này. Không cần internet.", auth_signout:"Đăng xuất", auth_no_acct:"Chưa có hồ sơ", auth_need_name:"Nhập tên (tối thiểu 2 ký tự)", auth_need_pin:"PIN phải 4-8 chữ số", auth_created:"✓ ��ã tạo hồ sơ", auth_signed_in:"✓ Đã đăng nhập", auth_signed_out:"Đã đăng xuất", auth_wrong_pin:"PIN sai", auth_bio_fail:"Xác thực sinh trắc học thất bại", auth_bio_unavail:"Không có sinh trắc học",
-    nav_settings:"Cài đặt", set_account_h:"Tài khoản", set_security_h:"Bảo mật", set_created:"Hồ sơ tạo", set_save:"Lưu thay đổi", set_saved:"✓ Đã lưu", set_sec_current:"Hiện tại", set_new_secret:"PIN / mật khẩu mới", set_update_sec:"Cập nhật bảo mật", set_sec_updated:"✓ Đã cập nhật bảo mật", auth_sec_h:"Bảo vệ ứng dụng bằng", sec_mode_none:"Không", sec_mode_pin:"PIN", sec_mode_password:"Mật khẩu", sec_mode_biometric:"Sinh trắc học", auth_enter_pin:"Nhập PIN", auth_enter_pw:"Nhập mật khẩu", auth_pw_ph:"Mật khẩu (tối thiểu 6)", auth_need_pw:"Mật khẩu tối thiểu 6 ký tự", auth_wrong_pw:"Mật khẩu sai", exp_map_thumb:"Sơ đồ bố trí",
+    nav_settings:"Cài đặt", set_account_h:"Tài khoản", set_security_h:"Bảo mật", set_created:"Hồ sơ tạo", set_save:"Lưu thay đổi", set_saved:"✓ Đã lưu", set_sec_current:"Hiện tại", set_new_secret:"PIN / mật khẩu mới", set_update_sec:"Cập nhật bảo mật", set_sec_updated:"✓ Đã cập nhật bảo m��t", auth_sec_h:"Bảo vệ ứng dụng bằng", sec_mode_none:"Không", sec_mode_pin:"PIN", sec_mode_password:"Mật khẩu", sec_mode_biometric:"Sinh trắc học", auth_enter_pin:"Nhập PIN", auth_enter_pw:"Nhập mật khẩu", auth_pw_ph:"Mật khẩu (tối thiểu 6)", auth_need_pw:"Mật khẩu tối thiểu 6 ký tự", auth_wrong_pw:"Mật khẩu sai", exp_map_thumb:"Sơ đồ bố trí",
     weather_data:"Dữ liệu thời ti��t",
     wx_idle:"Chưa lấy dữ liệu thời tiết. Dùng 📤 Xuất để lấy tự động.",
     wx_idle_btn:"Chưa lấy dữ liệu thời tiết. Nhấn nút phía trên để l���y.",
@@ -2658,12 +2671,12 @@ var I18N = {
     opens_camera:"Mở máy ảnh",
     photo_gallery:"Thư viện ảnh",
     choose_existing:"Chọn ảnh có sẵn",
-    upload_file:"Tải từ tệp",
+    upload_file:"Tải t��� tệp",
     browse_files:"Duyệt tệp",
     cancel:"Hủy",
     notes:"Ghi chú",
     ph_notes:"Quan sát, thời tiết, ghi chú...",
-    prev:"◀ Trước",
+    prev:"◀ Tr��ớc",
     save_next:"Lưu và trang sau ▶",
     saved:"✓ Đã lưu",
     all_done:"🎉 Đã xong tất cả các ô!",
@@ -2683,7 +2696,7 @@ var I18N = {
     t_hdr_tr:"Nghiệm thức",
     eff_legend_html:"<b>HL%</b>: <span style='color:var(--g)'>≥70 cao</span> | <span style='color:var(--am)'>40-69 vừa</span> | <span style='color:var(--rd)'>&lt;40 thấp</span>",
     plot_mode_arm:"Đánh số ARM: 101, 102…",
-    plot_mode_tr:"Đánh số T-R: T1R1, T2R1…",
+    plot_mode_tr:"Đánh s��� T-R: T1R1, T2R1…",
     serp_on:"Rắn lượn BẬT (Lần l��p 2 đảo ngược)",
     serp_off:"Rắn lượn TẮT (mọi hàng T→P)",
     active_plot_set:"Ô đang chọn",
@@ -2699,7 +2712,7 @@ var I18N = {
     email:"Email",
     dl_csv:"📤 Ki���m tra & Tải CSV",
     dl_xlsx:"📊 Kiểm tra & Tải ARM Excel (.xlsx)",
-    email_csv:"📧 Gửi CSV qua email",
+    email_csv:"���� Gửi CSV qua email",
     backup_restore:"Sao lưu & Khôi phục",
     share_asmt_h:"Chia sẻ một đợt đánh giá", share_asmt_hint:"Chỉ gửi quan sát + thời điểm hiện tại cho đồng nghiệp; hợp nhất dữ liệu của họ mà không ảnh hưởng phần còn lại.", share_asmt_btn:"📤 Chia sẻ đợt đánh giá này", merge_asmt:"Hợp nhất đánh giá", merge_asmt_btn:"🔀 Hợp nhất từ tệp", share_no_obs:"Hãy chọn một quan sát trước.", share_empty:"Chưa có dữ liệu cho quan sát/thời điểm này.", share_done:"✓ Đã chia sẻ đợt đánh giá", share_not_share:"Không phải tệp chia sẻ đánh giá.", merge_done:"✓ Đã hợp nhất {n} ô vào {o} / {tp}",
     dl_backup:"💾 Tải bản sao lưu", backup_done:"✓ Sao lưu xong", backup_fail:"Sao lưu thất bại", backup_replace_q:"Đã có b��n sao lưu tên {f}. Thay thế?", diag_h:"Chẩn đoán", diag_hint:"Nếu xuất chậm hoặc tệp không lưu được, hãy ghi nhật ký chẩn đoán (thời gian + kích thước) vào thư mục lưu trữ của bạn và chia sẻ.", diag_export:"🩺 Xuất chẩn đoán", diag_done:"✓ Đã ghi chẩn đoán vào thư mục lưu trữ của bạn", diag_fail:"Không thể ghi chẩn đoán", email_files:"📧 Gửi tệp qua email", email_attach_q:"Đính kèm tệp {f}?", email_none_sel:"Chưa chọn tệp nào để gửi email.", email_missing_files:"Hãy lưu tệp trước, sau đó gửi email.", email_fail:"Gửi email thất bại", email_web_note:"Đính kèm các tệp đã xuất này từ thư mục lưu trữ c��a bạn:", obs_dup_name:"Tên quan sát đó đã được sử dụng.", create_new:"Tạo mới", create_new_q:"Bắt đầu một thử nghiệm trống mới? Thử nghiệm hiện tại của bạn vẫn được lưu trên thiết bị này và trong Tệp gần đ��y.", create_new_done:"✓ Đã bắt đầu thử nghiệm mới", set_storage_h:"Thư mục lưu trữ",
@@ -2707,7 +2720,7 @@ var I18N = {
     reset:"Đặt lại",
     clear_all:"⚠️ Xóa toàn bộ dữ liệu",
     val_summary:"📋 Tóm tắt kiểm tra",
-    v_completeness:"Độ đầy đủ dữ liệu:",
+    v_completeness:"Độ đầy đ�� dữ liệu:",
     v_cells:"ô",
     v_trts_reps:"{nt} nghiệm thức × {nr} lần lặp",
     v_obs_int:"{no} quan sát × {nt} khoảng",
@@ -2742,7 +2755,7 @@ var I18N = {
     restored:"✓ Đã khôi phục",
     invalid_file:"Tệp không hợp lệ",
     clear_all_q:"Thao tác này sẽ XÓA TẤT CẢ dữ liệu!\nMột bản sao lưu sẽ được tải trước. Tiếp tục?",
-    cleared_ok:"✓ Đã xóa toàn bộ dữ liệu. Đã lưu một bản sao lưu.",
+    cleared_ok:"✓ Đã xóa toàn bộ dữ liệu. Đã lưu một b���n sao lưu.",
     backup_dl:"💾 Đã tải bản sao lưu",
     voice_label:"Giọng nói",
     voice_failed:"Giọng nói không khả dụng. Nhập thủ công:",
@@ -2770,7 +2783,7 @@ var I18N = {
     ti_reps:"Lần lặp",
     ti_utc:"Nghiệm thức UTC #",
     ti_app_dates:"Ngày phun thuốc",
-    ti_pm:"Chế độ đánh số ô",
+    ti_pm:"Chế độ đánh s�� ô",
     pm_arm_label:"ARM (Lặp×100+Vị trí)",
     pm_tr_label:"T-R (Nghiệm thức×Lặp)",
     ti_walk:"Đi lại trên ruộng",
@@ -2795,7 +2808,7 @@ var I18N = {
     wx_days_fetched:"ngày đã lấy cho",
     wx_days_cached:"ngày đã lưu",
     wx_refetch:"🌤️ Lấy lại thời tiết",
-    wx_fetched:"🌤️ Đã lấy thời tiết",
+    wx_fetched:"🌤️ Đã lấy thời ti���t",
     wx_clear_confirm:"Xóa toàn bộ dữ liệu thời tiết đã lưu?",
     wx_cleared_msg:"🗑️ Đã xóa {n} mục thời tiết đã lưu",
     wx_cache_cleared:"✓ Đã xóa bộ nhớ thời tiết",
@@ -2813,7 +2826,7 @@ var I18N = {
     auto_token:"(tự động)"
   }
   ,fr: {
-    crash_restored:"✓ Travail non enregistré récupéré", gps_off_prompt:"La localisation semble désactivée. Ouvrir les paramètres de localisation ?", prog_pptx_start:"Préparation de la présentation PowerPoint…", prog_pptx_slides:"Création des diapositives de données…", prog_pptx_photos:"Ajout des photos…", prog_pptx_finalize:"Finalisation des diapositives…", prog_done:"Terminé", downloaded_to:"✓ {f} téléchargé dans {d}", downloaded_generic:"✓ {f} téléchargé", share_title:"Partager des fichiers", share_hint:"Choisissez les fichiers puis une app (WhatsApp, Gmail, Bluetooth…).", share_send:"Partager", share_cancel:"Annuler", share_none_sel:"Sélectionnez au moins un fichier à partager.", share_files_btn:"📤 Partager les fichiers", share_saved_first:"Enregistrez d'abord les fichiers, puis partagez.", share_need_dl:"Téléchargez d'abord le CSV, l'Excel ou le PowerPoint, puis partagez.", share_fail:"Échec du partage",
+    crash_restored:"✓ Travail non enregistré récupéré", gps_off_prompt:"La localisation semble désactivée. Ouvrir les paramètres de localisation ?", prog_pptx_start:"Préparation de la présentation PowerPoint…", prog_pptx_slides:"Création des diapositives de données…", prog_pptx_photos:"Ajout des photos…", prog_pptx_finalize:"Finalisation des diapositives…", prog_done:"Terminé", downloaded_to:"✓ {f} téléchargé dans {d}", downloaded_generic:"✓ {f} téléchargé", share_title:"Partager des fichiers", share_hint:"Choisissez les fichiers puis une app (WhatsApp, Gmail, Bluetooth…).", share_send:"Partager", share_cancel:"Annuler", share_none_sel:"Sélectionnez au moins un fichier à partager.", share_files_btn:"�� Partager les fichiers", share_saved_first:"Enregistrez d'abord les fichiers, puis partagez.", share_need_dl:"Téléchargez d'abord le CSV, l'Excel ou le PowerPoint, puis partagez.", share_fail:"Échec du partage",
     
     open_folder_btn:"📂 Ouvrir le dossier de stockage",nav_storage:"Stockage et données",open_folder_fail:"Aucun dossier défini ou aucun gestionnaire de fichiers disponible",about_storage_label:"Dossier de stockage",repick_folder:"🔄 Changer le dossier de stockage",storage_autofolder_note:"Un dossier « FieldBook Pro » est créé automatiquement dans le dossier que vous choisissez.",migrate_q:"Copier vos données existantes vers le nouveau dossier ? (Choisissez Annuler pour laisser les anciens fichiers en place.)",migrate_ok:"✓ Données copiées vers le nouveau dossier",migrate_none:"Aucune donnée précédente à copier",applock_label:"Verrouillage de l'app",applock_hint:"Exiger empreinte / visage / PIN à l'ouverture",applock_on:"✓ Verrouillage de l'app activé",applock_off:"Verrouillage de l'app désactivé",applock_unavail:"Aucune biométrie ni verrouillage d'écran défini sur cet appareil",saf_not_set:"Non défini — appuyez sur une action d'enregistrement pour choisir",saf_web_mode:"Navigateur (téléchargements)",saf_pick_prompt:"Veuillez choisir votre dossier FieldBook Pro une fois",saf_pick_ok:"✓ Dossier défini — les fichiers y seront enregistrés",nav_about:"À propos",about_title:"ℹ️ À propos de FieldBook Pro",about_what_h:"Ce que fait cette application",about_what:"FieldBook Pro aide les chercheurs de terrain à mener des essais de pesticides hors ligne : calculer des doses de pulvérisation précises et enregistrer les observations parcelle par parcelle sur le terrain — sans connexion Internet.",about_dose_h:"Calculs de dose",about_dose:"Quatre outils en un : (1) convertir g m.a./ha en produit par hectare/acre et par parcelle, (2) mL par litre et par cuve, (3) solutions en pourcentage, et (4) solutions en ppm. Choisissez un onglet, saisissez vos chiffres, appuyez sur Calculer — chaque résultat affiche la réponse, les unités et les étapes utilisées. La conversion de surface utilise 1 hectare = 2,5 acres.",about_data_h:"Collecte de données",about_data:"Configurez votre essai (traitements, répétitions, observations), enregistrez les données de sous-échantillons et les photos par parcelle, suivez la progression, consultez les synthèses par traitement et exportez tout en CSV ou Excel. Vos données sont enregistrées automatiquement sur cet appareil. Sur Android, les sauvegardes, CSV/Excel et photos pleine résolution sont écrits dans le dossier FieldBook Pro que vous choisissez (Téléchargements), organisés par essai avec des sous-dossiers Raw Data et Photos.",about_tips_h:"Astuces rapides",about_tip1:"Utilisez le menu ☰ (en haut à gauche) pour naviguer entre les sections.",about_tip2:"Appuyez sur la barre de titre pour revenir à l'Accueil à tout moment.",about_tip3:"Basculez entre les langues avec les boutons EN / 中.",about_tip4:"Fonctionne entièrement hors ligne. Météo + Excel nécessitent Internet à la première utilisation.",about_feat_h:"Fonctionnalités",about_storage_desc:"Vos sauvegardes, fichiers CSV / Excel et photos en pleine résolution sont écrits dans le dossier FieldBook Pro sur votre appareil, organisés par essai avec des sous-dossiers Raw Data et Photos.",about_ver_h:"Version",about_ver_label:"Version",tm_scroll_hint:"↔ Faites glisser pour voir toutes les parcelles",wx_fail_prefix:"Échec de récupération de la météo :",wx_retry_q:"Réessayer maintenant ?",card_dose_sub:"5 outils d'essai — m.a., mL/L, %, ppm, parcelle",dz_title:"🧮 Calculateur de dose de pesticide",dz_sub:"Pour les essais au champ, la préparation de la pulvérisation et le calcul de dose par parcelle.",dz_t1:"m.a.→Prod",dz_t1s:"/ha & parcelle",dz_t2:"mL/L",dz_t2s:"par cuve",dz_t3:"%",dz_t3s:"solution",dz_t4:"PPM",dz_t4s:"mg/L",dz_m1_h:"g m.a./ha → Produit & Parcelle",dz_m2_h:"mL/L & par cuve",dz_m3_h:"Solution en pourcentage",dz_m4_h:"Solution PPM",dz_dose_ai:"Dose recommandée (g m.a. / ha)",dz_strength:"Concentration de la formulation",dz_ww:"% p/p — WP/WG/SP",dz_wv:"% p/v — EC/SC/SL",dz_str_h:"% p/p = g m.a./100 g. % p/v = g m.a./100 mL (20 % p/v = 200 g/L).",dz_show_rate:"Afficher la dose au champ",dz_per_ha:"Par hectare",dz_per_acre:"Par acre",dz_plot_opt:"Facultatif — mettre à l'échelle d'une parcelle (laisser vide pour la dose au champ uniquement)",dz_plot_area:"Surface de parcelle (m²)",dz_spray_vol:"Volume de pulvérisation",dz_prod_dose:"Dose de produit",dz_req_conc:"Concentration de pulvérisation requise (%)",dz_total_vol:"Volume total de pulvérisation (L)",dz_form_str_pct:"Concentration de la formulation (%)",dz_target_ppm:"ppm cible",dz_final_vol:"Volume final de pulvérisation (L)",dz_calc:"Calculer",dz_reset:"Réinitialiser",dz_copy:"Copier le résultat",dz_how:"Comment cela a été calculé",dz_prod_ha:"Produit par hectare",dz_prod_acre:"Produit par acre",dz_field_rate:"Dose au champ",dz_per_plot:"Par parcelle",dz_prod_plot:"Produit par parcelle",dz_water_plot:"Eau par parcelle",dz_conc:"Concentration",dz_water:"eau",dz_tank:"cuve",dz_per_tank2:"Par cuve",dz_per_l:"Par litre",dz_total_for:"Total pour",dz_total_big:"Total (grande unité)",dz_prod_req:"Produit requis",dz_ai_need:"Matière active nécessaire",dz_form_prod:"Produit formulé",dz_small:"Très petite quantité — utilisez une seringue ou une micropipette pour une mesure précise.",dz_e_enter:"Veuillez saisir",dz_e_neg:"ne peut pas être négatif.",dz_e_zero:"doit être supérieur à zéro.",go_home_q:"Aller au lanceur d'accueil ?",cat_dose:"Calculs de dose",cat_data:"Collecte de donn��es",nav_dose:"Calculateur de dose",dose_title:"🧮 Calculateur de dose",dose_sub:"Convertir entre dose de formulation, apport de m.a. et pratique de l'agriculteur.",dose_mA:"Mode A",dose_mA_s:"Formulation → m.a.",dose_mB:"Mode B",dose_mB_s:"m.a. cible → Formulation",dose_mC:"Mode C",dose_mC_s:"Pratique agriculteur → /ha",dose_form_load:"Formulation & teneur en m.a.",dose_form_name:"Nom du produit / de la formulation",dose_form_ph:"ex. Confidor 200 SL",dose_form_type:"Type de formulation",dose_liquid:"Liquide (EC/SC/SL) — g m.a. par litre",dose_solid:"Solide (WP/WG/SP/GR) — % p/p",dose_ai_gl:"Teneur en m.a. (g m.a. / litre de produit)",dose_ai_gl_h:"Sur l'étiquette, ex. « Imidaclopride 200 g/L SL » → 200",dose_ai_pct:"Teneur en m.a. (% p/p)",dose_ai_pct_h:"ex. « Mancozèbe 75 % WP » → 75. En interne = 750 g m.a./kg.",dose_area_vol:"Surface & volume de pulvérisation",dose_area_basis:"Base de surface",dose_per_ha:"Par hectare (ha)",dose_per_acre:"Par acre",dose_per_ha_s:"par ha",dose_per_acre_s:"par acre",dose_spray_vol:"Volume de pulvérisation (bouillie)",dose_spray_h:"Eau totale appliquée par unité de surface (nécessaire pour ml/L et dose par cuve).",dose_tank:"Taille de la cuve / du pulvérisateur à dos (L) — facultatif",dose_field:"Surface de champ à traiter — facultatif",dose_mA_in:"Mode A — Dose de formulation appliquée",dose_form_rate:"Dose de formulation",dose_mA_h:"Saisissez ce qui a ����té appliqué par ha/acre. Nous calculons les g m.a. apportés.",dose_mB_in:"Mode B — Dose de m.a. cible",dose_target_ai:"Dose de m.a. cible",dose_mB_h:"Saisissez les g m.a. recommandés par ha/acre. Nous calculons la formulation nécessaire.",dose_mC_in:"Mode C — Pratique de l'agriculteur",dose_farmer_conc:"Concentration de l'agriculteur",dose_mC_h:"« J'ai utilisé 2,5 ml par litre. » Nécessite le volume de pulvérisation ci-dessus pour obtenir l'apport réel /ha.",dose_fill:"Remplissez les champs pour voir les résultats…",dose_copy:"Copier le résultat",dose_ai_delivered:"m.a. apportée",dose_from:"à partir de",dose_ai_other:"m.a. apportée",dose_conc:"Concentration dans la cuve",dose_per_tank:"Par cuve de {n} L",dose_total_prod:"Produit total pour {a} {u}",dose_total_ai:"m.a. totale",dose_total_water:"Eau totale",dose_form_needed:"Formulation n��cessaire",dose_for_target:"pour la cible",dose_area_per_tank:"Surface couverte par cuve",dose_tanks_needed:"Cuves nécessaires",dose_true_form:"Dose r��elle de formulation",dose_cannot:"Calcul impossible pour le moment",dose_note:"Remarque",dose_w_ai:"Saisissez la teneur en m.a. (g/L ou %).",dose_w_vol:"Ajoutez le volume de pulvérisation pour obtenir ml/L et la dose par cuve.",dose_w_vol_c:"Saisissez le volume de pulvérisation (L/ha) — le Mode C en a besoin pour convertir ml/L en une dose par surface.",dose_w_ai_opt:"Ajoutez la teneur en m.a. pour voir aussi les g m.a. apportés.",dose_copied:"Copié dans le presse-papiers",dose_copy_fail:"Échec de la copie",nav_home:"Accueil",home_title:"Que voulez-vous faire ?",home_sub:"Choisissez un outil ci-dessous. Utilisez le menu ☰ tout moment pour naviguer.",menu:"Menu",card_setup_sub:"Infos d'essai, plan, carte, observations",card_entry_sub:"Enregistrer données de sous-échantillons & photos",card_prog_sub:"Suivre l'achèvement des parcelles",card_sum_sub:"Moyennes & efficacit�� par traitement",card_exp_sub:"CSV, Excel, météo, sauvegarde",card_home_sub:"Revenir au lanceur",recent_files:"Fichiers récents",recent_none:"Aucun fichier enregistré pour l'instant",recent_open_fail:"Impossible d'ouvrir le fichier",recent_opened:"✓ {n} ouvert",ph_protocol:"ex. PROT-2026-001",ph_trial:"ex. T-001",ph_crop:"ex. Riz IR-64",ph_product:"Nom du produit",ph_pest:"ex. Cicadelle brune du riz",ph_location:"Nom du champ / site",ph_soil:"ex. Argile limoneuse",app_title:"FieldBook Pro",developer:"Application développée par A. Bharanideepan",nav_setup:"Config.",nav_entry:"Saisie",nav_progress:"Progression",nav_summary:"Synthèse",nav_export:"Export",trial_info:"Infos d'essai",protocol:"Protocole",trial_number:"Numéro d'essai",crop_variety:"Culture / Variété",product:"Produit",target_pest:"Ravageur cible",location:"Emplacement",soil_type:"Type de sol",dates:"Dates",sowing_date:"Date de semis / repiquage",sowing_hint:"JAT/JBT calculés automatiquement à partir de cette date",app_dates:"Dates d'application",app_dates_hint:"Jours apr��s traitement (JAT) ou jours avant traitement (JBT) calculés automatiquement",add_app_date:"+ Ajouter une date d'application",gps_location:"Position GPS",not_set:"Non défini",capture_gps:"📍 Capturer le GPS",captured:"Capturé",gps_acquiring:"📍 Acquisition…",gps_ok:"✓ GPS capturé",gps_set:"Défini",gps_na:"Non disponible",gps_denied:"Autorisation refusée",gps_unavail:"Indisponible",gps_corners_title:"Coins du champ",gps_corner_hint:"Marchez jusqu'à chaque coin, sélectionnez-le, puis appuyez sur Capturer le GPS.",corner_tl:"Haut-gauche",corner_tr:"Haut-droite",corner_bl:"Bas-gauche",corner_br:"Bas-droite",gps_corner_set:"✓ {c} capturé",gps_center:"Centre du champ",gps_corners_done:"{n}/4 coins",gps_capture_corner:"📍 Capturer {c}",alt:"Alt",trial_design:"Plan d'essai",treatments:"Traitements",utc_label:"N° traitement UTC",plots:"parcelles",trial_map:"Carte d'essai (BCR)",rbd_desc:"Disposition en blocs complets randomis��s. Lignes = Répétitions, Colonnes = Positions de parcelle.",plot_num_mode:"Mode de numérotation des parcelles",arm_style:"Style ARM (Rép×100+Pos)",tr_style:"Style Traitement×Répétition",layout_actions:"Actions de disposition",randomize:"🎲 Randomiser (BCR)",reset_seq:"↻ Rétablir en séquentiel",walk_pattern:"Schéma de parcours du champ",walk_normal:"Normal (toutes les lignes G→D)",walk_serp:"Serpentin (zigzag)",map_tips_html:"💡 <b>Astuces :</b><br>• <b>Randomiser</b> fonctionne pour les modes de numérotation ARM et T-R<br>• <b>Serpentin</b> inverse une répétition sur deux afin que les numéros de parcelle suivent votre parcours au champ<br>• <b>Glissez</b> une cellule pour réorganiser librement au sein de la même répétition<br>• <b>Appuyez</b> sur une cellule pour la définir comme parcelle active pour la saisie",map_preview:"Aperçu de la carte",map_fit:"Ajuster largeur",map_zoom:"Zoom",an_settings:"Paramètres d'analyse",an_metrics:"Indicateurs à afficher",an_base:"Base de comparaison",an_base_utc:"UTC (par défaut)",an_base_trt:"Choisir un traitement",an_cmp:"Traitements à comparer",an_dsimax:"Note max DSI",an_moist_std:"% humidité standard",an_moist_harvest:"% humidité à la récolte",an_yield_basis:"Base de conversion du rendement",an_by_area:"Par surface",an_by_plants:"Par nombre de plants",an_obs_area:"Surface observée (m²)",an_target_basis:"Base cible",an_ha:"Par hectare",an_acre:"Par acre",an_nplants_obs:"Plants observés",an_nplants_target:"Plants par ha/acre",an_manual:"Formule manuelle",an_manual_hint:"Variables : T=moyenne traitement, C=moyenne témoin, Rw=brut, Ha=humidité%, Hs=standard%, A=surface. Fonctions : min,max,abs,sqrt,ln,log,exp. Exemple : (C-T)/C*100",an_src:"obs. source",m_redUTC:"% Réduction par rapport au témoin",m_incUTC:"% Augmentation par rapport au témoin",m_wceCount:"ECM (densité)",m_wceDM:"ECM (biomasse)",m_dsi:"DSI",m_moist:"Corrigé pour l'humidité",m_yieldha:"Rendement /ha ou /acre",m_manual:"Formule manuelle",an_sheet:"Synthèse d'analyse",dl_pptx:"📽 PPTX",pptx_missing:"PptxGenJS non chargé - v��rifiez Internet",pptx_done:"✓ PowerPoint téléchargé",pptx_report_sub:"Rapport d'essai au champ",pptx_slide_obs:"Observation",pptx_base:"Base de comparaison",pptx_map:"Carte d'essai",pptx_weather:"Météo",pptx_photos:"Photos",ph_retake:"Reprendre",ph_delete:"Supprimer",ph_done:"Terminé",gps_map_title:"Carte du champ",gps_open_map:"��️ Ouvrir dans Maps",gps_map_hint:"Vérifiez la position capturée dans votre application de cartes.",wx_src_cma:"Administration météorologique de Chine",wx_src_openmeteo:"Open-Meteo (ERA5)",auth_create_h:"Créez votre profil",auth_name_ph:"Votre nom",auth_org_ph:"Organisation (facultatif)",auth_pin_ph:"PIN (4-8 chiffres)",auth_create_btn:"Créer le profil",auth_welcome:"Bon retour",auth_signin_btn:"Se connecter",auth_bio_btn:"🔑 Utiliser la biométrie",auth_local_note:"Stocké uniquement sur cet appareil. Aucune connexion requise.",auth_signout:"Se déconnecter",auth_no_acct:"Aucun profil",auth_need_name:"Saisissez votre nom (min 2 caractères)",auth_need_pin:"Le PIN doit comporter 4 à 8 chiffres",auth_created:"✓ Profil créé",auth_signed_in:"✓ Connecté",auth_signed_out:"Déconnecté",auth_wrong_pin:"PIN incorrect",auth_bio_fail:"Échec de l'authentification biométrique",auth_bio_unavail:"Biométrie non disponible",nav_settings:"Paramètres",set_account_h:"Compte",set_security_h:"Sécurité",set_created:"Profil créé",set_save:"Enregistrer les modifications",set_saved:"✓ Enregistré",set_sec_current:"Actuel",set_new_secret:"Nouveau PIN / mot de passe",set_update_sec:"Mettre à jour la sécurité",set_sec_updated:"✓ Sécurité mise à jour",auth_sec_h:"Protéger l'application avec",sec_mode_none:"Aucun",sec_mode_pin:"PIN",sec_mode_password:"Mot de passe",sec_mode_biometric:"Biométrie",auth_enter_pin:"Saisissez votre PIN",auth_enter_pw:"Saisissez votre mot de passe",auth_pw_ph:"Mot de passe (min 6 caractères)",auth_need_pw:"Le mot de passe doit comporter au moins 6 caractères",auth_wrong_pw:"Mot de passe incorrect",exp_map_thumb:"Disposition d'essai",weather_data:"Données mét��o",wx_idle:"Aucune donnée météo récupérée pour l'instant. Utilisez 📤 Export pour récupérer automatiquement.",wx_idle_btn:"Aucune donnée météo récupérée pour l'instant. Cliquez sur le bouton ci-dessus pour récupérer.",fetch_wx_now:"🌤️ Récupérer la météo maintenant (aperçu)",clear_wx_cache:"🗑️ Effacer la météo en cache",trt_labels:"Étiquettes de traitement",label_ph:"Étiquette / nom du traitement",observations:"Observations",ph_add_obs:"Ajouter une observation",assessment_intervals:"Intervalles d'évaluation",ph_add_tp:"ex. 3JAA1",save_start:"✅ Enregistrer & Démarrer",observation:"Observation",assessment_interval:"Intervalle d'évaluation",subs_for_obs:"Sous-échantillons pour cette observation",plots_completed:"Parcelles terminées",select_plot:"Sélectionner une parcelle",plot_legend:"— vert=fait, rouge=en attente",active_plot:"Parcelle active",ready:"Prêt",done:"Fait",active:"Active",pending:"En attente",quick_fill:"⚡ Remplissage rapide :",ph_value:"valeur",fill_all:"Tout remplir",filled_cells:"✓ {n} cellules remplies avec {v}",enter_value_first:"Saisissez d'abord une valeur",dup_overwrite:"Cette parcelle a déjà des données pour l'observation/intervalle actuel. Écraser ?",data_columns:"Colonnes de données",add_column:"Ajouter une colonne",remove_column:"Supprimer une colonne",col_default_name:"Colonne 1",col_new_name:"Colonne",col_single_hint:"Colonne à valeur unique. Appuyez sur ＋ Ajouter une colonne pour enregistrer plusieurs mesures par sous-échantillon (ex. Petites larves, Grandes larves).",col_name_ph:"Nom de la colonne",col_delete_q:"Supprimer la colonne « {c} » et ses données pour cette observation ?",all_columns:"Toutes les colonnes",columns_short:"Colonnes",col_name_prompt:"Nommez cette colonne de mesure :",col_added:"✓ Colonne « {c} » ajoutée",col_removed:"Colonne « {c} » supprimée",col_tap_rename:"Appuyez pour renommer",plot:"Parcelle",sub:"S-éch",subsample:"Sous-échantillon",value:"Valeur",mean:"Moyenne",sum_total:"Somme (Total) :",photos:"Photos",capture_upload:"📷 Capturer / Téléverser une photo",photos_count:"photos",no_photos:"Aucune photo pour l'instant",delete_q:"Supprimer ?",photo_saved:"Photo enregistrée",add_photo:"📷 Ajouter une photo",take_photo:"Prendre une photo",opens_camera:"Ouvre l'appareil photo",photo_gallery:"Galerie photo",choose_existing:"Choisir une existante",upload_file:"Téléverser depuis un fichier",browse_files:"Parcourir les fichiers",cancel:"Annuler",notes:"Notes",ph_notes:"Observations, météo, notes...",prev:"◀ Préc.",save_next:"Enregistrer et page suivante ▶",saved:"✓ Enregistré",all_done:"🎉 Toutes les parcelles terminées !",swapped:"Permuté",treatment:"Traitement",utc_short:"(UTC)",saved_excl:"✓ Enregistré !",subs_label:"Sous-échantillons",prog_hint_html:"Accès rapide à n'importe quelle parcelle. <b>✓ = complet</b>, <b>✗ = en attente</b>. <b>Appuyez sur une ligne pour aller à la saisie.</b>",completion:"Ach��vement",status:"Statut",rep_label:"R",sum_hint_html:"Moyenne &amp; efficacité pour l'observation &amp; l'intervalle actuels. <b>Appuyez sur une ligne pour modifier.</b>",eff:"Eff%",reps:"Rép.",t_hdr_arm:"T# (N° parcelles)",t_hdr_tr:"Traitement",eff_legend_html:"<b>Eff%</b> : <span style='color:var(--g)'>≥70 élevée</span> | <span style='color:var(--am)'>40-69 modérée</span> | <span style='color:var(--rd)'>&lt;40 faible</span>",plot_mode_arm:"Numérotation ARM : 101, 102…",plot_mode_tr:"Numérotation T-R : T1R1, T2R1…",serp_on:"Serpentin ACTIVÉ (Rép 2 inversée)",serp_off:"Serpentin DÉSACTIVÉ (tout G→D)",active_plot_set:"Parcelle active",randomize_confirm:"Cela va randomiser les positions des parcelles au sein de chaque répétition.\\nLes données existantes restent avec leur parcelle. Continuer ?",randomized_ok:"✓ Disposition randomisée",reset_confirm:"Rétablir une disposition séquentielle (T1, T2, T3…) ?",layout_reset:"✓ Disposition r��initialisée",apps_count:"appli",apps_count_pl:"applis",no_app_dates:"Aucune date d'application pour l'instant",date_saved:"Date enregistrée",export_data:"Exporter les données",email:"E-mail",dl_csv:"📤 Valider & Télécharger CSV",dl_xlsx:"📊 Valider & Télécharger Excel ARM (.xlsx)",email_csv:"📧 Envoyer le CSV par e-mail",backup_restore:"Sauvegarde & Restauration",dl_backup:"💾 Télécharger la sauvegarde",backup_done:"✓ Sauvegarde terminée",backup_fail:"Échec de la sauvegarde",backup_replace_q:"Une sauvegarde nommée {f} existe déjà. La remplacer ?", diag_h:"Diagnostics", diag_hint:"Si les exportations sont lentes ou qu'un fichier ne s'est pas enregistré, écrivez un journal de diagnostic (durées + tailles) dans votre dossier de stockage et partagez-le.", diag_export:"🩺 Exporter les diagnostics", diag_done:"✓ Diagnostics écrits dans votre dossier de stockage", diag_fail:"Impossible d'écrire les diagnostics",restore:"Restaurer",share_asmt_h:"Partager une évaluation",share_asmt_hint:"Envoyez uniquement l'observation + le point temporel actuels à un collègue ; fusionnez les siens sans toucher au reste.",share_asmt_btn:"📤 Partager cette évaluation",merge_asmt:"Fusionner une évaluation",merge_asmt_btn:"🔀 Fusionner depuis un fichier",share_no_obs:"Sélectionnez d'abord une observation.",share_empty:"Aucune donnée dans cette observation/ce point temporel pour l'instant.",share_done:"✓ Évaluation partagée",share_not_share:"Ce n'est pas un fichier de partage d'évaluation.",merge_done:"✓ {n} parcelle(s) fusionnée(s) dans {o} / {tp}",reset:"Réinitialiser",clear_all:"⚠️ Effacer toutes les données",val_summary:"📋 Résumé de validation",v_completeness:"Complétude des données :",v_cells:"cellules",v_trts_reps:"{nt} traitements × {nr} répétitions",v_obs_int:"{no} observations × {nt} intervalles",val_warnings:"Avertissements",val_none:"✅ Aucun avertissement - Tous les champs requis sont complets !",v_proto:"Protocole non défini",v_trial:"Numéro d'essai non défini",v_crop:"Culture/Variété non définie",v_loc:"Emplacement non défini",v_sow:"Date de semis non définie",v_gps:"GPS non capturé",v_no_data:"parcelles sans données :",v_partial:"parcelles avec données partielles",v_oor:"valeurs négatives trouvées",completeness:"Complétude",warnings:"avertissements",all_inc:"Les données incomplètes seront exportées sous forme de cellules vides.",download_q:"Télécharger quand même ?",fetching_wx:"Récupération de la météo…",csv_done_wx:"✓ CSV téléchargé (météo : {n} jours)",csv_done_nowx:"✓ CSV téléchargé (pas de météo : {e})",xlsx_done_nowx:"⚠ Excel téléchargé sans météo : {e}",wx_cache_used:"✓ Excel enregistré avec la météo en cache (hors ligne)",sheetjs_missing:"SheetJS non chargé - vérifiez Internet",xlsx_sheets:"✓ Excel téléchargé ({n} feuilles)",incl_weather:"météo incl.",enter_email:"Saisissez d'abord un e-mail",mail_subject:"Données FieldBook Pro",mail_body:"CSV en pièce jointe.",sel_json:"Sélectionnez un fichier .json ou .csv",replace_all_q:"Remplacer TOUTES les données actuelles ?",restored:"✓ Restauré",invalid_file:"Fichier non valide",clear_all_q:"Cela va SUPPRIMER TOUTES les données !\\nUne sauvegarde sera d'abord téléchargée. Continuer ?",cleared_ok:"✓ Toutes les données effacées. Une sauvegarde a été enregistrée.",backup_dl:"💾 Sauvegarde téléchargée",voice_label:"Voix",voice_failed:"Voix indisponible. Saisissez manuellement :",enter_value:"Saisissez une valeur :",xlsx_info_sheet:"Infos d'essai",xlsx_field:"Champ",xlsx_value:"Valeur",xlsx_plot:"Parcelle",xlsx_subsample:"Sous-échantillon",wx_sheet:"Météo (quotidienne)",ti_protocol:"Protocole",ti_trial:"Numéro d'essai",ti_crop:"Culture/Variété",ti_product:"Produit",ti_pest:"Ravageur cible",ti_loc:"Emplacement",ti_soil:"Type de sol",ti_sow:"Date de semis",ti_gps_lat:"Latitude GPS",ti_gps_lon:"Longitude GPS",ti_gps_acc:"Précision GPS (m)",ti_gps_alt:"Altitude GPS (m)",ti_gps_time:"Heure de capture GPS",ti_trts:"Traitements",ti_reps:"Répétitions",ti_utc:"N° traitement UTC",ti_app_dates:"Dates d'application",ti_pm:"Mode de numérotation des parcelles",pm_arm_label:"ARM (Rép×100+Pos)",pm_tr_label:"T-R (Traitement×Répétition)",ti_walk:"Parcours du champ",walk_serp_label:"Serpentin",walk_norm_label:"Normal (G→D)",ti_export_date:"Date d'export",ti_obs_hdr:"Observation",ti_subs_hdr:"Sous-échantillons",ti_intervals:"Intervalles d'évaluation",ti_trt_hdr:"Traitement",ti_label_hdr:"Étiquette",wx_no_gps:"Aucun GPS capturé. Définissez d'abord le GPS dans Configuration.",wx_no_range:"Impossible de déterminer la plage de dates. Définissez la date de semis + au moins un intervalle d'évaluation (AAAA-MM-JJ) ou une date d'application.",wx_api_err:"Erreur de l'API météo",wx_no_daily:"Aucune donnée quotidienne renvoyée",wx_parse_err:"Erreur d'analyse",wx_http:"HTTP",wx_net_err:"Erreur réseau - vérifiez Internet",wx_timeout:"Délai de la requête dépassé (20s)",wx_fetching_btn:"⏳ Récupération…",wx_status_fetching:"⏳ Récupération de la météo…",wx_days_fetched:"jours récupérés pour",wx_days_cached:"jours en cache",wx_refetch:"🌤️ Récupérer à nouveau la météo",wx_fetched:"🌤️ Météo récupérée",wx_clear_confirm:"Effacer toutes les données météo en cache ?",wx_cleared_msg:"🗑️ {n} entrées météo en cache effacées",wx_cache_cleared:"✓ Cache météo effacé",wx_need_inputs:"GPS + date de semis + intervalles/dates d'application nécessaires pour récupérer.",wx_date:"Date",wx_source_line:"Source : archive Open-Meteo ERA5 | Récupéré :",wx_src_full:"Source météo : Open-Meteo (https://open-meteo.com) archive ERA5 | Emplacement : {lat}, {lon} | Période : {s} à {e} ({n} jours) | Récupéré : {f}",exists:"Existe déjà",added:"Ajouté",obs_small_larvae:"Petites larves",obs_large_larvae:"Grandes larves",obs_total_larvae:"Total des larves",email_files:"📧 Envoyer les fichiers par e-mail",email_attach_q:"Joindre le fichier {f} ?",email_none_sel:"Aucun fichier sélectionné.",email_missing_files:"Enregistrez d'abord le(s) fichier(s), puis envoyez-les.",email_fail:"Échec de l'envoi",email_web_note:"Joignez ces fichiers exportés depuis votre dossier de stockage :",obs_dup_name:"Ce nom d'observation est déjà utilisé.",saved:"✓ Enregistré",create_new:"Créer nouveau",create_new_q:"Démarrer un nouvel essai vierge ? Votre essai actuel reste enregistré sur cet appareil et dans les fichiers récents.",create_new_done:"✓ Nouvel essai démarré",set_storage_h:"Dossier de stockage",auto_token:"(auto)",csv_hdr:["Protocole","Essai","Culture","Emplacement","GPS_Lat","GPS_Lon","Date_Semis","Sol","Dates_App","Parcelle_No","Traitement","Étiquette","Rép","Observation","Colonne","Intervalle","Sous-échantillon","Valeur","Notes"],obs_defaults:["Petites larves","Grandes larves","Total des larves","Plants endommagés","Plants sains","% Mortalité"]
   }
@@ -6496,12 +6509,12 @@ var AGRO_I18N={
   agro_add_kpi:{en:"Add KPI header",es419:"Agregar encabezado KPI",pt:"Adicionar cabeçalho KPI",zh:"添加KPI表头",id:"Tambah header KPI",vi:"Thêm tiêu đề KPI",fr:"Ajouter un en-tête KPI",it:"Aggiungi intestazione KPI",de:"KPI-Kopfzeile hinzufügen"},
   agro_add_kpm:{en:"Add KPM header",es419:"Agregar encabezado KPM",pt:"Adicionar cabeçalho KPM",zh:"添加KPM表头",id:"Tambah header KPM",vi:"Thêm tiêu đề KPM",fr:"Ajouter un en-tête KPM",it:"Aggiungi intestazione KPM",de:"KPM-Kopfzeile hinzufügen"},
   agro_pick_header:{en:"Select a header…",es419:"Seleccione un encabezado…",pt:"Selecione um cabeçalho…",zh:"选择表头…",id:"Pilih header…",vi:"Chọn tiêu đề…",fr:"Sélectionnez un en-tête…",it:"Seleziona un'intestazione…",de:"Kopfzeile auswählen…"},
-  agro_create_header:{en:"➕ Create new header…",es419:"➕ Crear nuevo encabezado…",pt:"➕ Criar novo cabeçalho…",zh:"➕ 新建表头…",id:"➕ Buat header baru…",vi:"➕ Tạo tiêu đề mới…",fr:"➕ Créer un en-tête…",it:"➕ Crea nuova intestazione…",de:"➕ Neue Kopfzeile erstellen…"},
+  agro_create_header:{en:"➕ Create new header…",es419:"➕ Crear nuevo encabezado…",pt:"➕ Criar novo cabeçalho…",zh:"➕ 新建表头…",id:"➕ Buat header baru…",vi:"➕ Tạo tiêu đề mới…",fr:"��� Créer un en-tête…",it:"➕ Crea nuova intestazione…",de:"➕ Neue Kopfzeile erstellen…"},
   agro_new_header_prompt:{en:"Name the new header:",es419:"Nombre del nuevo encabezado:",pt:"Nome do novo cabeçalho:",zh:"输入新表头名称：",id:"Beri nama header baru:",vi:"Đặt tên tiêu đề mới:",fr:"Nom du nouvel en-tête :",it:"Nome della nuova intestazione:",de:"Name der neuen Kopfzeile:"},
   agro_headers_kpi:{en:"KPI headers",es419:"Encabezados KPI",pt:"Cabeçalhos KPI",zh:"KPI表头",id:"Header KPI",vi:"Tiêu đề KPI",fr:"En-têtes KPI",it:"Intestazioni KPI",de:"KPI-Kopfzeilen"},
   agro_headers_kpm:{en:"KPM headers",es419:"Encabezados KPM",pt:"Cabeçalhos KPM",zh:"KPM表头",id:"Header KPM",vi:"Tiêu đề KPM",fr:"En-têtes KPM",it:"Intestazioni KPM",de:"KPM-Kopfzeilen"},
   agro_desc:{en:"Description",es419:"Descripción",pt:"Descrição",zh:"说明",id:"Deskripsi",vi:"Mô tả",fr:"Description",it:"Descrizione",de:"Beschreibung"},
-  agro_view_desc:{en:"ℹ️ Description",es419:"ℹ️ Descripción",pt:"ℹ️ Descrição",zh:"ℹ️ 说明",id:"ℹ️ Deskripsi",vi:"ℹ️ Mô tả",fr:"ℹ️ Description",it:"ℹ️ Descrizione",de:"ℹ️ Beschreibung"},
+  agro_view_desc:{en:"ℹ️ Description",es419:"ℹ�� Descripción",pt:"ℹ️ Descrição",zh:"ℹ️ 说明",id:"ℹ️ Deskripsi",vi:"ℹ️ Mô tả",fr:"ℹ️ Description",it:"ℹ️ Descrizione",de:"ℹ️ Beschreibung"},
   agro_no_desc:{en:"No description available.",es419:"Sin descripción disponible.",pt:"Nenhuma descrição disponível.",zh:"暂无说明。",id:"Tidak ada deskripsi.",vi:"Không có mô tả.",fr:"Aucune description disponible.",it:"Nessuna descrizione disponibile.",de:"Keine Beschreibung verfügbar."},
   agro_dup_header:{en:"That header is already added.",es419:"Ese encabezado ya está agregado.",pt:"Esse cabeçalho já foi adicionado.",zh:"该���头已添加。",id:"Header itu sudah ditambahkan.",vi:"Tiêu đề đó đã được thêm.",fr:"Cet en-tête est déjà ajouté.",it:"Intestazione già aggiunta.",de:"Diese Kopfzeile ist bereits hinzugefügt."},
   agro_map_layout:{en:"Layout type",es419:"Tipo de diseño",pt:"Tipo de layout",zh:"布局类型",id:"Jenis tata letak",vi:"Kiểu bố tr��",fr:"Type de disposition",it:"Tipo di layout",de:"Layout-Typ"},
