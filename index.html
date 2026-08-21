@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<title>FieldBook Pro</title>
+
+<!-- Build stamp (replaced at deploy time by GitHub Actions) -->
+<meta name="fb-build" content="__BUILD_VERSION__">
+
+<!-- PWA manifest -->
+<link rel="manifest" href="./manifest.webmanifest">
+<meta name="theme-color" content="#0D3D0D">
+
+<!-- iOS "Add to Home Screen" standalone support -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="FieldBook">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
+
+<style>
+  html,body{margin:0;height:100%;background:#0D3D0D;overflow:hidden}
+  #fbFrame{border:0;width:100%;height:100%;display:block}
+  #fbBoot{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+          color:#C8E6C9;font-family:sans-serif;background:#0D3D0D;z-index:10}
+</style>
+</head>
+<body>
+<div id="fbBoot">Loading FieldBook Pro…</div>
+
+<iframe id="fbFrame" src="./app.html" allow="camera; microphone; geolocation; clipboard-write"></iframe>
+
+<!-- Install banner + update toast (framework-free) -->
+<script src="./install-banner.js"></script>
+
+<script>
+(function () {
+  'use strict';
+
+  // 1) Register the service worker (offline + installable) and wire updates.
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('./service-worker.js').then(function (reg) {
+        // If an update is found, prompt the user once it's installed & waiting.
+        reg.addEventListener('updatefound', function () {
+          var sw = reg.installing;
+          if (!sw) return;
+          sw.addEventListener('statechange', function () {
+            if (sw.state === 'installed' && navigator.serviceWorker.controller) {
+              if (window.fbShowUpdateToast) window.fbShowUpdateToast(function () {
+                sw.postMessage({ type: 'FB_SKIP_WAITING' });
+                location.reload();
+              });
+            }
+          });
+        });
+      }).catch(function (e) { console.warn('SW registration failed:', e); });
+
+      // A newly activated SW (new deploy) notifies us — offer a refresh.
+      navigator.serviceWorker.addEventListener('message', function (ev) {
+        if (ev.data && ev.data.type === 'FB_SW_UPDATED' && window.fbShowUpdateToast) {
+          window.fbShowUpdateToast();
+        }
+      });
+    });
+  }
+
+  // 2) Inject the FBNative shim into the app iframe before its own scripts need it.
+  var frame = document.getElementById('fbFrame');
+  function injectShim() {
+    try {
+      var doc = frame.contentDocument, win = frame.contentWindow;
+      if (!doc || !win || win.__fbShimInjected) return;
+      win.__fbShimInjected = true;
+      var s = doc.createElement('script');
+      s.src = './bridge-web.js';
+      s.setAttribute('data-fb-shim', '1');
+      (doc.head || doc.documentElement).insertBefore(s, (doc.head || doc.documentElement).firstChild);
+    } catch (e) { console.warn('shim inject error', e); }
+  }
+  frame.addEventListener('load', function () {
+    document.getElementById('fbBoot').style.display = 'none';
+    injectShim();
+  });
+  var tries = 0, timer = setInterval(function () {
+    tries++;
+    try {
+      if (frame.contentWindow && frame.contentDocument &&
+          frame.contentDocument.readyState !== 'uninitialized') {
+        injectShim();
+        if (frame.contentWindow.FBNative || tries > 40) clearInterval(timer);
+      }
+    } catch (e) {}
+    if (tries > 60) clearInterval(timer);
+  }, 25);
+})();
+</script>
+</body>
+</html>

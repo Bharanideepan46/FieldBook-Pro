@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FieldBook Pro</title>
+<script>
+/* GitHub Pages serves this file for any path it can't find (a real 404).
+   FieldBook Pro is a single-page app, so instead of showing an error we send
+   the visitor to the app entry point, preserving whatever deep-link path/query
+   they used so client-side routing can pick it up. */
+(function () {
+  var base = location.pathname.replace(/\/[^\/]*$/, '/'); // repo base path
+  var target = base + 'index.html' + location.search + location.hash;
+  location.replace(target);
+})();
+</script>
+<meta http-equiv="refresh" content="0; url=./index.html">
+</head>
+<body style="font-family:sans-serif;background:#0D3D0D;color:#C8E6C9;text-align:center;padding:40px">
+  Redirecting to <a href="./index.html" style="color:#fff">FieldBook Pro</a>…
+</body>
+</html>
