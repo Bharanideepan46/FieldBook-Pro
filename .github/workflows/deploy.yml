@@ -1,0 +1,47 @@
+name: Deploy PWA to GitHub Pages
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Stamp build version (auto-bumps SW cache per deploy)
+        run: |
+          VER="${GITHUB_SHA::12}-$(date -u +%Y%m%d%H%M%S)"
+          echo "Build version: $VER"
+          grep -rl --binary-files=without-match '__BUILD_VERSION__' . \
+            --exclude-dir=.git \
+            | while read -r f; do
+                sed -i "s/__BUILD_VERSION__/$VER/g" "$f"
+              done
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload site artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: "."
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
