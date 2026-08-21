@@ -47,7 +47,6 @@ jobs:
         with:
           # Upload the repository root (all static files live at the root).
           path: "."
-          path: "."
 
       - name: Deploy to GitHub Pages
         id: deployment
