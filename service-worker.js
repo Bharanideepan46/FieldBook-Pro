@@ -17,7 +17,6 @@ var SHELL = [
   './',
   './index.html',
   './app.html',
-  './bridge-web.js',
   './install-banner.js',
   './manifest.webmanifest',
   './icons/icon-192.png',
