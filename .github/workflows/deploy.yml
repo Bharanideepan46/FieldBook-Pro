@@ -1,15 +1,23 @@
 name: Deploy PWA to GitHub Pages
+
+# Auto-deploys the static site on every push to the default branch.
+# Also runnable on demand from the Actions tab.
 on:
   push:
     branches: ["main"]
   workflow_dispatch:
+
+# Permissions required by the official Pages deploy action.
 permissions:
   contents: read
   pages: write
   id-token: write
+
+# Allow one concurrent deployment; newer pushes cancel in-progress runs.
 concurrency:
   group: "pages"
   cancel-in-progress: true
+
 jobs:
   deploy:
     environment:
@@ -19,16 +27,28 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Stamp build version
+
+      - name: Stamp build version (auto-bumps SW cache per deploy)
         run: |
           VER="${GITHUB_SHA::12}-$(date -u +%Y%m%d%H%M%S)"
-          grep -rl --binary-files=without-match '__BUILD_VERSION__' . --exclude-dir=.git | while read -r f; do sed -i "s/__BUILD_VERSION__/$VER/g" "$f"; done
+          echo "Build version: $VER"
+          # Replace the __BUILD_VERSION__ token everywhere it appears.
+          grep -rl --binary-files=without-match '__BUILD_VERSION__' . \
+            --exclude-dir=.git \
+            | while read -r f; do
+                sed -i "s/__BUILD_VERSION__/$VER/g" "$f"
+              done
+
       - name: Setup Pages
         uses: actions/configure-pages@v5
+
       - name: Upload site artifact
         uses: actions/upload-pages-artifact@v3
         with:
+          # Upload the repository root (all static files live at the root).
           path: "."
+          path: "."
+
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
