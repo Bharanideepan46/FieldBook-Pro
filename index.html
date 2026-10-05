@@ -216,6 +216,21 @@
         };
         memFiles[filename] = rec;           // keyed by basename for lookups
         idbPut(STORE_FILES, rec);           // async write-through
+        // v20: for explicit (non-internal) exports, also write to real disk via
+        // the best available tier and show the Saved-to popup. The IndexedDB
+        // mirror above is the offline-safe copy; this is the user-visible file.
+        try{
+          if(!isInternal && trial && typeof fbWeb!=="undefined" && fbWeb.writeLogical){
+            var _blob = isBinaryB64(kind, filename)
+              ? b64ToBlob(stripDataUrl(content), mimeForName(filename))
+              : new Blob([content], { type: mimeForName(filename) });
+            fbWeb.writeLogical(logicalPath, _blob).then(function(res){
+              if(res && res.ok){ if(window.fbShowSavedTo) window.fbShowSavedTo(res.display||logicalPath); }
+              else if(res && res.needDir){ if(window.fbOpenStorageModal) window.fbOpenStorageModal(true); }
+              /* cancelled iOS share or soft failure: data still safe in IndexedDB */
+            });
+          }
+        }catch(_e){}
         return true;
       } catch (e) { return false; }
     },
@@ -298,6 +313,16 @@
         var rec = { path: path, dataUrl: dataUrl, meta: metaJson || '{}', modified: nowMs() };
         memPhotos[path] = rec;              // synchronous mirror
         idbPut(STORE_PHOTOS, rec);          // async write-through
+        // v20: write the full-res photo to real disk via the best tier + popup.
+        try{
+          if(typeof fbWeb!=="undefined" && fbWeb.writeLogical){
+            var _pblob = b64ToBlob(stripDataUrl(dataUrl), "image/jpeg");
+            fbWeb.writeLogical(path, _pblob).then(function(res){
+              if(res && res.ok){ if(window.fbShowSavedTo) window.fbShowSavedTo(res.display||path); }
+              else if(res && res.needDir){ if(window.fbOpenStorageModal) window.fbOpenStorageModal(true); }
+            });
+          }
+        }catch(_e){}
         return path;
       } catch (e) { return ''; }
     },
@@ -652,6 +677,165 @@
   }
 
   // -------------------------------------------------------------- install
+
+  // ====================================================================
+  // fbWeb : real-disk export tiers for the PWA (no native bridge).
+  //   Logical path convention (shown to user, identical on all platforms):
+  //     FieldBook Pro/<Trial>/Raw Data/<file>
+  //     FieldBook Pro/<Trial>/Photos/<Obs>/<Interval>/<Plot>/<file>.jpg
+  //   Physical write:
+  //     Tier 1 (File System Access): real nested directories.
+  //     Tier 2 (Web Share files)   : single file, name flattened with '__'.
+  //     Tier 3 (<a download>)      : single file, name flattened with '__'.
+  //   The in-app "Saved to:" popup always shows the clean nested path.
+  // ====================================================================
+  var fbWeb = (function () {
+    var DIR_KEY = 'fs_dir_handle';   // persisted FileSystemDirectoryHandle (Tier 1)
+    var _dirHandle = null;           // cached handle for this session
+
+    function hasFSA() { return (typeof window.showDirectoryPicker === 'function'); }
+    function canShareFiles() {
+      try {
+        if (!navigator.canShare || !navigator.share) return false;
+        // Probe with a tiny file; some browsers expose share() but not file share.
+        var f = new File([new Blob(['x'])], 'probe.txt', { type: 'text/plain' });
+        return !!navigator.canShare({ files: [f] });
+      } catch (e) { return false; }
+    }
+    // capability(): 'fsa' | 'share' | 'download'
+    function capability() {
+      if (hasFSA()) return 'fsa';
+      if (canShareFiles()) return 'share';
+      return 'download';
+    }
+
+    // ---- Tier 1 handle persistence (IndexedDB via existing kv store) ----
+    function saveHandle(h) {
+      _dirHandle = h;
+      try { idbPut(STORE_KV, h, DIR_KEY); } catch (e) {}
+      try { memKV['root_folder'] = 'FieldBook Pro (chosen folder)'; idbPut(STORE_KV, memKV['root_folder'], 'root_folder'); } catch (e) {}
+    }
+    function loadHandle() {
+      return new Promise(function (resolve) {
+        if (_dirHandle) { resolve(_dirHandle); return; }
+        try {
+          var req = _db && _db.transaction(STORE_KV, 'readonly').objectStore(STORE_KV).get(DIR_KEY);
+          if (!req) { resolve(null); return; }
+          req.onsuccess = function () { _dirHandle = req.result || null; resolve(_dirHandle); };
+          req.onerror = function () { resolve(null); };
+        } catch (e) { resolve(null); }
+      });
+    }
+    function verifyPermission(h, readWrite) {
+      if (!h || !h.queryPermission) return Promise.resolve(true);
+      var opts = { mode: readWrite ? 'readwrite' : 'read' };
+      return h.queryPermission(opts).then(function (p) {
+        if (p === 'granted') return true;
+        if (!h.requestPermission) return false;
+        return h.requestPermission(opts).then(function (p2) { return p2 === 'granted'; });
+      }).catch(function () { return false; });
+    }
+
+    // Prompt the user to choose a storage folder (Tier 1 only).
+    function pickDir() {
+      if (!hasFSA()) return Promise.resolve(false);
+      return window.showDirectoryPicker({ id: 'fieldbookpro', mode: 'readwrite' })
+        .then(function (h) { saveHandle(h); return true; })
+        .catch(function () { return false; });
+    }
+
+    // Ensure a nested subdir chain exists under base; returns the leaf dir handle.
+    function ensureDirs(base, parts) {
+      var p = Promise.resolve(base);
+      parts.forEach(function (seg) {
+        p = p.then(function (dir) { return dir.getDirectoryHandle(seg, { create: true }); });
+      });
+      return p;
+    }
+
+    // logicalPath -> ['FieldBook Pro', trial, 'Raw Data', file] (array of segments)
+    function splitLogical(logicalPath) {
+      return String(logicalPath).split('/').filter(function (s) { return s.length; });
+    }
+    // Flatten 'a/b/c/file.ext' -> 'a__b__c__file.ext' (Tier 2/3 filename).
+    function flattenName(logicalPath) {
+      return splitLogical(logicalPath).join('__');
+    }
+
+    // Write a blob to the logical path using the best available tier.
+    // Returns a Promise<{ok:bool, tier:string, display:string}>.
+    // display = clean nested path we show in the popup.
+    function writeLogical(logicalPath, blob) {
+      var display = splitLogical(logicalPath).join('/');
+      var cap = capability();
+
+      if (cap === 'fsa') {
+        return loadHandle().then(function (h) {
+          if (!h) return { ok: false, tier: 'fsa', display: display, needDir: true };
+          return verifyPermission(h, true).then(function (okp) {
+            if (!okp) return { ok: false, tier: 'fsa', display: display, needDir: true };
+            var segs = splitLogical(logicalPath);
+            var file = segs.pop();
+            return ensureDirs(h, segs).then(function (leaf) {
+              return leaf.getFileHandle(file, { create: true }).then(function (fh) {
+                return fh.createWritable().then(function (w) {
+                  return w.write(blob).then(function () { return w.close(); })
+                    .then(function () { return { ok: true, tier: 'fsa', display: display }; });
+                });
+              });
+            });
+          });
+        }).catch(function () {
+          // fall through to download on any FSA failure
+          return downloadTier(logicalPath, blob, display);
+        });
+      }
+
+      if (cap === 'share') {
+        var fname = flattenName(logicalPath);
+        try {
+          var file2 = new File([blob], fname, { type: blob.type || 'application/octet-stream' });
+          if (navigator.canShare && navigator.canShare({ files: [file2] })) {
+            return navigator.share({ files: [file2], title: fname })
+              .then(function () { return { ok: true, tier: 'share', display: display }; })
+              .catch(function (err) {
+                // User cancelled share sheet: data is still mirrored in IDB.
+                var cancelled = err && (err.name === 'AbortError');
+                return { ok: !!cancelled ? false : false, tier: 'share', display: display, cancelled: !!cancelled };
+              });
+          }
+        } catch (e) {}
+        return downloadTier(logicalPath, blob, display);
+      }
+
+      return downloadTier(logicalPath, blob, display);
+    }
+
+    function downloadTier(logicalPath, blob, display) {
+      try { download(blob, flattenName(logicalPath)); return Promise.resolve({ ok: true, tier: 'download', display: display }); }
+      catch (e) { return Promise.resolve({ ok: false, tier: 'download', display: display }); }
+    }
+
+    // Build a Blob from the app's (content, kind) convention.
+    function toBlob(content, kind, filename) {
+      var bin = isBinaryB64(kind, filename);
+      if (bin) { return b64ToBlob(stripDataUrl(content), mimeForName(filename)); }
+      return new Blob([content], { type: mimeForName(filename) });
+    }
+
+    return {
+      capability: capability,
+      hasChosenDir: function () { return !!_dirHandle; },
+      pickDir: pickDir,
+      loadHandle: loadHandle,
+      writeLogical: writeLogical,
+      toBlob: toBlob,
+      flattenName: flattenName,
+      splitLogical: splitLogical
+    };
+  })();
+  window.fbWeb = fbWeb;
+
   window.FBNative = FB;
 
   boot().then(function () {
@@ -1082,6 +1266,27 @@ body.has-bnav #pg-entry{padding-bottom:210px}
 body.ifs-mode .agro-only{ display:none !important; }
 body.agro-mode #an_body, body.agro-mode .an-panel{ display:none !important; }
 body.agro-mode #s_tbl{ display:none !important; }
+/* ---- Agronomy metadata simplification (agro mode ONLY; IFS untouched) ---- */
+/* Rows removed in Agronomy: Product, Target Pest. JS tags them .agro-hide-row */
+body.agro-mode .agro-hide-row{ display:none !important; }
+/* Whole accordions hidden in Agronomy: GPS. JS tags via #acc-gps */
+body.agro-mode #acc-gps{ display:none !important; }
+/* Agronomy exports: PPTX, Share Files, ARM Excel removed (kept in IFS). */
+body.agro-mode #btn_xlsx,
+body.agro-mode #btn_pptx,
+body.agro-mode #btn_em{ display:none !important; }
+/* Agronomy Summary: table must fit the frame — NO horizontal scroll (IFS keeps scroll). */
+body.agro-mode #s_tbl{ overflow-x:hidden !important; }
+body.agro-mode #s_tbl .sm{ width:100%; table-layout:fixed; }
+body.agro-mode #s_tbl .sm th,
+body.agro-mode #s_tbl .sm td{ white-space:normal; word-break:break-word; overflow-wrap:anywhere; padding:6px 3px; font-size:11px; }
+body.agro-mode #s_tbl .sm th{ font-size:10px; padding:7px 3px; }
+/* Trial Map graphics/preview hidden in Agronomy; keep only Numbering + Layout
+   type selectors. JS tags the map canvas/preview + walking pattern. */
+body.agro-mode .agro-map-hide{ display:none !important; }
+/* Grey italic helper notes under Protocol / Trial Number (agro only) */
+body.agro-mode .agro-note{ display:block; font-size:11px; color:#888; font-style:italic; margin:-2px 0 8px; line-height:1.35; }
+.agro-note{ display:none; }
 
 .agro-sec{ margin-top:12px; padding-top:8px; border-top:1px solid #e3e9e3; }
 .agro-pick{ display:flex; gap:8px; align-items:center; }
@@ -1130,21 +1335,73 @@ body.agro-mode #s_tbl{ display:none !important; }
 .agro-ch-wrap{ width:100%; overflow:hidden; }
 #agro_canvas{ width:100%; height:auto; display:block; }
 .agro-hint{ font-size:11px; color:#777; margin-top:4px; line-height:1.4; }
+/* v21: compact interval nav (smaller buttons, wrap on narrow screens) */
+.agro-ch-nav{ flex-wrap:wrap; gap:6px; margin:8px 0; }
+.agro-ch-nav .btn{ flex:0 0 auto; padding:7px 10px; font-size:12px; min-width:0; min-height:0; line-height:1.15; }
+.agro-ch-int{ flex:1 1 60px; font-size:12px; }
+/* v21: hide the bottom Observation selector in the Agronomy Summary tab */
+body.agro-mode #s_obs_wrap{ display:none !important; }
+/* v21: keep the Agronomy Summary tab within the viewport (no page scroll) */
+body.agro-mode #agro_chart_host{ margin-bottom:10px; }
+body.agro-mode #agro_chart_host .agro-ch-wrap{ max-height:38vh; }
+body.agro-mode #agro_chart_host #agro_canvas{ max-height:38vh; }
+</style>
+<style id="fb_store_css">
+#fb_modal_ov,#fb_savedto_ov{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99999;display:none;align-items:center;justify-content:center;padding:18px;-webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px)}
+#fb_modal_ov.show,#fb_savedto_ov.show{display:flex}
+.fb-card{background:#fff;border-radius:18px;max-width:460px;width:100%;box-shadow:0 18px 60px rgba(0,0,0,.35);overflow:hidden;animation:fbpop .16s ease-out}
+@keyframes fbpop{from{transform:scale(.94);opacity:.4}to{transform:scale(1);opacity:1}}
+.fb-card-bd{padding:22px 22px 8px}
+.fb-card-h{font-size:18px;font-weight:800;color:#1A5E1A;margin:0 0 10px;display:flex;align-items:center;gap:8px}
+.fb-card-p{font-size:14px;color:#333;line-height:1.5;margin:0 0 12px}
+.fb-path{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;line-height:1.5;color:#0b3d0b;background:#f0f6f0;border:1px solid #cfe0cf;border-radius:10px;padding:10px 12px;margin:0 0 6px;word-break:break-word}
+.fb-card-ft{display:flex;gap:10px;padding:12px 18px 18px;flex-wrap:wrap}
+.fb-btn{flex:1 1 auto;min-width:120px;border:none;border-radius:12px;padding:13px 16px;font-size:16px;font-weight:700;cursor:pointer}
+.fb-btn-primary{background:linear-gradient(135deg,#2e7d32,#43a047);color:#fff}
+.fb-btn-ghost{background:#eef1ee;color:#333}
+.fb-note{font-size:11.5px;color:#777;padding:0 22px 14px;line-height:1.45}
 </style>
 </head><body>
+<div id="fb_modal_ov" role="dialog" aria-modal="true">
+  <div class="fb-card">
+    <div class="fb-card-bd">
+      <h3 class="fb-card-h"><span>📁</span><span id="fb_modal_title"></span></h3>
+      <p class="fb-card-p" id="fb_modal_body"></p>
+      <div class="fb-path" id="fb_modal_path" style="display:none"></div>
+    </div>
+    <div class="fb-card-ft">
+      <button type="button" class="fb-btn fb-btn-ghost" id="fb_modal_later" onclick="fbStorageModalLater()"></button>
+      <button type="button" class="fb-btn fb-btn-primary" id="fb_modal_ok" onclick="fbStorageModalChoose()"></button>
+    </div>
+    <div class="fb-note" id="fb_modal_note"></div>
+  </div>
+</div>
+<div id="fb_savedto_ov" role="dialog" aria-modal="true">
+  <div class="fb-card">
+    <div class="fb-card-bd">
+      <h3 class="fb-card-h"><span>✅</span><span id="fb_savedto_title"></span></h3>
+      <div class="fb-path" id="fb_savedto_path"></div>
+    </div>
+    <div class="fb-card-ft">
+      <button type="button" class="fb-btn fb-btn-primary" id="fb_savedto_ok" onclick="fbSavedToClose()"></button>
+    </div>
+  </div>
+</div>
+
 
 <div class="scrim" id="scrim" onclick="closeDrawer()"></div>
 <aside class="drawer" id="drawer" role="navigation" aria-label="Main menu">
   <div class="dw-hd">
     <div class="dw-logo">🌾</div>
     <div class="dw-ttl"><span data-i18n="app_title">FieldBook Pro</span></div>
-    <div class="dw-dev"><span data-i18n="developer">App developed by A. Bharanideepan</span></div>
+    <div class="dw-dev" style="display:none"></div>
   </div>
   <div class="dw-list">
     <button class="dw-item" id="dw_home" type="button" onclick="goDrawerHome()"><span class="dw-ic">🏠</span><span data-i18n="nav_home">Home</span></button>
     <div class="dw-sep"></div>
     <button class="dw-item" id="dw_dose" onclick="navTo('dose')"><span class="dw-ic">🧮</span><span data-i18n="cat_dose">Dose Calculations</span></button>
-    <button class="dw-item" id="dw_data" onclick="navTo('setup')"><span class="dw-ic">📋</span><span data-i18n="cat_data">Data Collection</span></button>
+    <button class="dw-item" id="dw_data_ifs" onclick="agroStart('ifs')"><span class="dw-ic">📋</span><span data-i18n="ifs_card_title">Data Collection - IFS</span></button>
+    <button class="dw-item" id="dw_data_agro" onclick="agroStart('agro')"><span class="dw-ic">🌱</span><span data-i18n="agro_card_title">Data Collection - Agronomy</span></button>
     <div class="dw-recent" id="dw_recent"></div>
     <button class="dw-item" id="dw_storage" onclick="fbStorageMenu()"><span class="dw-ic">📁</span><span data-i18n="nav_storage">Storage &amp; data</span></button>
     <div class="dw-sep"></div>
@@ -1167,7 +1424,7 @@ body.agro-mode #s_tbl{ display:none !important; }
 
 <div class="hdr"><button class="hamb" id="hambBtn" type="button" aria-label="Menu" onclick="openDrawer()">☰</button><div class="hdr-row"><h1 id="homeLink" onclick="goHomeConfirm()" style="cursor:pointer" title="Home">🌾 <span data-i18n="app_title">FieldBook Pro</span></h1>
 <select id="lang_sel" class="lang-sel" onchange="setLang(this.value)" aria-label="Language"><option value="auto">🌐 Auto</option><option value="en">English</option><option value="zh">中文</option><option value="id">Bahasa Indonesia</option><option value="vi">Tiếng Việt</option><option value="es419">Español</option><option value="pt">Português</option><option value="fr">Français</option><option value="it">Italiano</option><option value="de">Deutsch</option></select></div>
-<div class="dev"><span data-i18n="developer">App developed by A. Bharanideepan</span></div></div>
+</div>
 <div class="pg a" id="pg-home">
   <div class="home-hd">
     <h2 data-i18n="home_title">What do you want to do?</h2>
@@ -1278,11 +1535,13 @@ body.agro-mode #s_tbl{ display:none !important; }
 <div class="pg" id="pg-setup">
 <div class="acc open" id="acc-trial"><button class="acc-h" onclick="tA('acc-trial')"><span class="acc-ic">📋</span><span class="acc-t" data-i18n="trial_info">Trial Info</span><span class="acc-ch">▼</span></button><div class="acc-bd"><div class="acc-in">
 <label data-i18n="protocol">Protocol</label><div class="vrow"><input id="s_proto" data-i18n-ph="ph_protocol"><button class="mic" data-target="s_proto">🎤</button></div>
+<div class="agro-note" id="s_proto_note">(should be identical to Agronomy App Trial Record ID)</div>
 <label data-i18n="trial_number">Trial Number</label><div class="vrow"><input id="s_trial" data-i18n-ph="ph_trial"><button class="mic" data-target="s_trial">🎤</button></div>
+<div class="agro-note" id="s_trial_note">Number sequentially: 001, 002, 003… &nbsp;e.g. Protocol AP26Q8U001 → Trial AP26Q8U001-MS001</div>
 <label data-i18n="crop_variety">Crop/Variety</label><div class="vrow"><input id="s_crop" data-i18n-ph="ph_crop"><button class="mic" data-target="s_crop">🎤</button></div>
-<label data-i18n="product">Product</label><div class="vrow"><input id="s_product" data-i18n-ph="ph_product"><button class="mic" data-target="s_product">🎤</button></div>
-<label data-i18n="target_pest">Target Pest</label><div class="vrow"><input id="s_pest" data-i18n-ph="ph_pest"><button class="mic" data-target="s_pest">🎤</button></div>
-<label data-i18n="location">Location</label><div class="vrow"><input id="s_loc" data-i18n-ph="ph_location"><button class="mic" data-target="s_loc">🎤</button></div>
+<div class="agro-hide-row"><label data-i18n="product">Product</label><div class="vrow"><input id="s_product" data-i18n-ph="ph_product"><button class="mic" data-target="s_product">🎤</button></div></div>
+<div class="agro-hide-row"><label data-i18n="target_pest">Target Pest</label><div class="vrow"><input id="s_pest" data-i18n-ph="ph_pest"><button class="mic" data-target="s_pest">🎤</button></div></div>
+<label id="s_loc_lbl" data-i18n="location">Location</label><div class="vrow"><input id="s_loc" data-i18n-ph="ph_location"><button class="mic" data-target="s_loc">🎤</button></div>
 <label data-i18n="soil_type">Soil Type</label><div class="vrow"><input id="s_soil" data-i18n-ph="ph_soil"><button class="mic" data-target="s_soil">🎤</button></div>
 </div></div></div>
 <div class="acc open" id="acc-dates"><button class="acc-h" onclick="tA('acc-dates')"><span class="acc-ic">📅</span><span class="acc-t" data-i18n="dates">Dates</span><span class="acc-b" id="appd_b">0</span><span class="acc-ch">▼</span></button><div class="acc-bd"><div class="acc-in">
@@ -1363,7 +1622,7 @@ body.agro-mode #s_tbl{ display:none !important; }
 </div>
 <div class="pg" id="pg-summary">
 <div class="ic"><span class="ii">📊</span><p data-i18n="sum_hint_html"></p></div>
-<div style="margin-bottom:10px"><label style="margin-top:0" data-i18n="observation">Obs</label><div class="bx" id="s_obs"></div></div>
+<div id="s_obs_wrap" style="margin-bottom:10px"><label style="margin-top:0" data-i18n="observation">Obs</label><div class="bx" id="s_obs"></div></div>
 <div style="margin-bottom:10px"><label data-i18n="assessment_interval">Interval</label><div class="bx" id="s_tp"></div></div>
 <div class="an-panel"><div class="an-h" onclick="toggleAnPanel()"><span data-i18n="an_settings">Analysis settings</span><span id="an_chev">▾</span></div><div class="an-body" id="an_body" style="display:none"><label style="margin-top:0" data-i18n="an_metrics">Metrics</label><div id="an_metrics" class="an-chks"></div><label data-i18n="an_base">Comparison base</label><select id="an_base" onchange="onAnBase()"><option value="utc" data-i18n="an_base_utc">UTC (default)</option><option value="trt" data-i18n="an_base_trt">Choose treatment</option></select><select id="an_basetrt" style="display:none;margin-top:6px" onchange="onAnField()"></select><label data-i18n="an_cmp">Treatments to compare</label><div id="an_cmp" class="an-chks"></div><div id="an_srcwrap"></div><div class="an-grid"><div><label data-i18n="an_dsimax">DSI max grade</label><input id="an_dsimax" type="number" step="1" min="1" oninput="onAnField()"></div><div><label data-i18n="an_moist_std">Standard moisture %</label><input id="an_moiststd" type="number" step="0.1" oninput="onAnField()"></div><div><label data-i18n="an_moist_harvest">Harvest moisture %</label><input id="an_moistharv" type="number" step="0.1" oninput="onAnField()"></div></div><label data-i18n="an_yield_basis">Yield conversion basis</label><select id="an_areamode" onchange="onAnAreaMode()"><option value="area" data-i18n="an_by_area">By area</option><option value="plants" data-i18n="an_by_plants">By plant count</option></select><div id="an_area_box" class="an-grid" style="margin-top:6px"><div><label data-i18n="an_obs_area">Observed area (m²)</label><input id="an_obsarea" type="number" step="0.01" oninput="onAnField()"></div><div><label data-i18n="an_target_basis">Target basis</label><select id="an_targetbasis" onchange="onAnField()"><option value="ha" data-i18n="an_ha">Per hectare</option><option value="acre" data-i18n="an_acre">Per acre</option></select></div></div><div id="an_plant_box" class="an-grid" style="display:none;margin-top:6px"><div><label data-i18n="an_nplants_obs">Plants observed</label><input id="an_nplobs" type="number" step="1" oninput="onAnField()"></div><div><label data-i18n="an_nplants_target">Plants per ha/acre</label><input id="an_npltarget" type="number" step="1" oninput="onAnField()"></div></div><label data-i18n="an_manual">Manual formula</label><input id="an_manual" type="text" placeholder="(C-T)/C*100" oninput="onAnField()"><div class="an-hint" data-i18n="an_manual_hint"></div></div></div><div id="s_tbl" style="overflow-x:auto;margin-top:12px"></div>
 </div>
@@ -1378,7 +1637,7 @@ body.agro-mode #s_tbl{ display:none !important; }
 <button class="btn bs" id="btn_zip" data-i18n="export_zip_btn" style="margin-top:8px;background:linear-gradient(135deg,#00695c,#00897b)">📦 Export folder (ZIP)</button>
 <div style="font-size:11px;color:#888;margin-top:4px" data-i18n="export_zip_hint">Packages this trial’s Raw Data and Photos into one .zip with the FieldBook Pro folder structure — ideal for iPhone/iPad (save to Files).</div>
 </div></div></div>
-<div class="acc" id="acc-bk"><button class="acc-h" onclick="tA('acc-bk')"><span class="acc-ic">💾</span><span class="acc-t" data-i18n="backup_restore">Backup</span><span class="acc-ch">▼</span></button><div class="acc-bd"><div class="acc-in"><button class="btn bs" id="btn_dlJ" data-i18n="dl_backup" style="margin-top:0">💾</button><label data-i18n="restore">Restore</label><input type="file" id="restF" accept=".json,.csv,application/json,text/csv,*/*" style="margin-bottom:8px"><button class="btn bs" id="btn_rs" data-i18n="restore">Restore</button><hr style="border:none;border-top:1px solid #e0e0e0;margin:14px 0"><div style="font-size:12px;font-weight:700;color:var(--g);text-transform:uppercase;letter-spacing:.5px" data-i18n="share_asmt_h">Share one assessment</div><div style="font-size:12px;color:#666;margin:4px 0 8px" data-i18n="share_asmt_hint">Send just the current observation + timepoint to a teammate; merge theirs back without touching the rest.</div><button class="btn bs" id="btn_shareA" data-i18n="share_asmt_btn" style="margin-top:0">📤</button><label data-i18n="merge_asmt">Merge assessment</label><input type="file" id="mergeF" accept=".json,application/json,*/*" style="margin-bottom:8px"><button class="btn bs" id="btn_mergeA" data-i18n="merge_asmt_btn">🔀</button><hr style="border:none;border-top:1px solid #e0e0e0;margin:14px 0"><div style="font-size:12px;font-weight:700;color:var(--g);text-transform:uppercase;letter-spacing:.5px" data-i18n="diag_h">Diagnostics</div><div style="font-size:12px;color:#666;margin:4px 0 8px" data-i18n="diag_hint">If exports are slow or a file didn't save, write a diagnostic log (timings + sizes) into your storage folder and share it.</div><button class="btn bs" id="btn_diag" data-i18n="diag_export" style="margin-top:0">🩺 Export diagnostics</button></div></div></div>
+<div class="acc" id="acc-bk"><button class="acc-h" onclick="tA('acc-bk')"><span class="acc-ic">💾</span><span class="acc-t" data-i18n="backup_restore">Backup</span><span class="acc-ch">▼</span></button><div class="acc-bd"><div class="acc-in"><button class="btn bs" id="btn_dlJ" data-i18n="dl_backup" style="margin-top:0">💾</button><label data-i18n="restore">Restore</label><input type="file" id="restF" accept=".json,.csv,application/json,text/csv,*/*" style="margin-bottom:8px"><button class="btn bs" id="btn_rs" data-i18n="restore">Restore</button><hr style="border:none;border-top:1px solid #e0e0e0;margin:14px 0"><div style="font-size:12px;font-weight:700;color:var(--g);text-transform:uppercase;letter-spacing:.5px" data-i18n="diag_h">Diagnostics</div><div style="font-size:12px;color:#666;margin:4px 0 8px" data-i18n="diag_hint">If exports are slow or a file didn't save, write a diagnostic log (timings + sizes) into your storage folder and share it.</div><button class="btn bs" id="btn_diag" data-i18n="diag_export" style="margin-top:0">🩺 Export diagnostics</button></div></div></div>
 <div class="acc" id="acc-rst"><button class="acc-h" onclick="tA('acc-rst')"><span class="acc-ic">⚠️</span><span class="acc-t" data-i18n="reset">Reset</span><span class="acc-ch">▼</span></button><div class="acc-bd"><div class="acc-in"><button class="btn br" id="btn_cl" data-i18n="clear_all" style="margin-top:0">⚠️</button></div></div></div>
 </div>
 <div class="pg" id="pg-settings">
@@ -1451,6 +1710,14 @@ body.agro-mode #s_tbl{ display:none !important; }
         <li><b>Mode-aware file/folder naming</b>: photo and raw-data folders follow the chosen plot numbering (ARM → 101, 102… or T-R → T1R1…).</li>
         <li>Data columns defined in Setup stay in sync with the Entry grid automatically.</li>
         <li>Dates shown as DD-Mon-YYYY throughout the app and exports.</li>
+        <li><b>Installable PWA</b>: add to Home Screen on Android &amp; iPhone and run full-screen, fully offline, from your own device.</li>
+        <li><b>Cross-platform save</b>: real on-device folders on Android/Chrome/Edge (File System Access), and Save-to-Files via the share sheet on iPhone/Safari — with an automatic download fallback.</li>
+        <li><b>“Saved to…” confirmation</b> popup after every export (CSV / Excel / PowerPoint / photos / backup), showing the exact nested folder path.</li>
+        <li><b>Crash-safe autosave every 2 seconds</b> plus save-on-change; your work is recovered automatically after an unexpected close, reopening the exact page you were on.</li>
+        <li><b>First-run storage setup</b>: a one-time prompt lets you choose your folder (or confirm Save-to-Files on iPhone); re-choose any time from Settings.</li>
+        <li><b>Agronomy assessment charts</b>: box-plot visualisation per observation and interval, compact interval navigation, and an optional manual formula.</li>
+        <li><b>10 languages</b>: Auto / English / 中文 / Español (LatAm) / Português / Bahasa Indonesia / Tiếng Việt / Français / Italiano / Deutsch.</li>
+        <li><b>Offline update flow</b>: a service worker caches the whole app and offers a one-tap “Reload” when a new version is available.</li>
       </ul>
     </div></div>
   </div>
@@ -1465,9 +1732,23 @@ body.agro-mode #s_tbl{ display:none !important; }
     </div></div>
   </div>
   <div class="acc open">
+    <button class="acc-h" style="pointer-events:none"><span class="acc-ic">✨</span><span class="acc-t">What's new in v0.15</span></button>
+    <div class="acc-bd"><div class="acc-in">
+      <ul class="about-ul">
+        <li>Packaged as an installable, offline PWA for Android and iPhone.</li>
+        <li>Reliable saving on both platforms with a clear “Saved to…” confirmation showing the full folder path.</li>
+        <li>Autosave interval tightened to every 2 seconds; exact-page restore after a crash or reopen.</li>
+        <li>Agronomy Summary tab tidied: compact Prev/Next interval buttons, chart kept within the screen, and the redundant bottom observation selector removed.</li>
+        <li>Removed the “Share one assessment” block from Data Collection to streamline the Backup section.</li>
+        <li>Developer credit now shown only here in About (removed from the menu and header).</li>
+        <li>Interface available in 10 languages.</li>
+      </ul>
+    </div></div>
+  </div>
+  <div class="acc open">
     <button class="acc-h" style="pointer-events:none"><span class="acc-ic">📦</span><span class="acc-t" data-i18n="about_ver_h">Version</span></button>
     <div class="acc-bd"><div class="acc-in">
-      <p class="about-p"><b data-i18n="about_ver_label">Version</b>: <span id="about_ver">v0.9 (Field Edition)</span></p>
+      <p class="about-p"><b data-i18n="about_ver_label">Version</b>: <span id="about_ver">v0.15</span></p>
       <p class="about-p" data-i18n="developer">App developed by A. Bharanideepan</p>
     </div></div>
   </div>
@@ -1667,7 +1948,7 @@ var I18N = {
     /* exists */
     exists:"Already exists", added:"Added",
     /* csv header */
-    csv_hdr:["Protocol","Trial","Crop","Location","GPS_Lat","GPS_Lon","Sowing_Date","Soil","App_Dates","Plot_No","Treatment","Label","Rep","Observation","Column","Interval","Subsample","Value","Notes"],
+    csv_hdr:["Protocol","trial","Crop","Location","GPS_Lat","GPS_Lon","Sowing_Date","Soil","App_Dates","Plot_No","treatment","Label","rep","Observation","Column","Interval","Subsample","value","Notes"],
     /* observation defaults */
     obs_defaults:["Small Larvae","Large Larvae","Total Larvae","Damaged Plants","Healthy Plants","Mortality %"],
     obs_small_larvae:"Small Larvae", obs_large_larvae:"Large Larvae", obs_total_larvae:"Total Larvae",
@@ -2973,6 +3254,25 @@ function voiceLocale(){
     default:      return 'en-US';
   }
 }
+/* ===== v20 storage i18n (merged post-definition; English fallback) ===== */
+(function(){
+  if(typeof I18N!=="object"||!I18N) return;
+  var A={
+    en:{ st_title:"Choose where files are saved", st_body_fsa:"Pick a folder once. FieldBook Pro will save CSV, Excel, PowerPoint and photos into it — organised per trial.", st_body_ios:"On this device, each export opens the Share sheet — tap “Save to Files” → On My iPhone › FieldBook Pro. Your work is always auto-saved inside the app.", st_body_dl:"Exports are saved to your browser’s Downloads folder. Your work is always auto-saved inside the app.", st_choose:"Choose folder", st_gotit:"Got it", st_later:"Later", st_note:"You can change this anytime in Storage & data.", saved_title:"Saved to:", saved_ok:"Confirm" },
+    zh:{ st_title:"选择文件保存位置", st_body_fsa:"选择一次文件夹。FieldBook Pro 将把 CSV、Excel、PowerPoint 和照片按试验分类保存到其中。", st_body_ios:"在本设备上，每次导出会打开共享面板 — 点击“存储到文件” → 我的 iPhone › FieldBook Pro。您的数据始终在应用内自动保存。", st_body_dl:"导出的文件保存在浏览器的下载文件夹。您的数据始终在应用内自动保存。", st_choose:"选择文件夹", st_gotit:"知道了", st_later:"稍后", st_note:"您可以随时在“存储与数据”中更改。", saved_title:"已保存到：", saved_ok:"确认" },
+    es419:{ st_title:"Elige dónde se guardan los archivos", st_body_fsa:"Elige una carpeta una vez. FieldBook Pro guardará CSV, Excel, PowerPoint y fotos en ella, organizados por ensayo.", st_body_ios:"En este dispositivo, cada exportación abre la hoja de Compartir — toca “Guardar en Archivos” → En mi iPhone › FieldBook Pro. Tu trabajo siempre se guarda automáticamente en la app.", st_body_dl:"Las exportaciones se guardan en la carpeta Descargas del navegador. Tu trabajo siempre se guarda automáticamente en la app.", st_choose:"Elegir carpeta", st_gotit:"Entendido", st_later:"Más tarde", st_note:"Puedes cambiarlo cuando quieras en Almacenamiento y datos.", saved_title:"Guardado en:", saved_ok:"Confirmar" },
+    pt:{ st_title:"Escolha onde os arquivos são salvos", st_body_fsa:"Escolha uma pasta uma vez. O FieldBook Pro salvará CSV, Excel, PowerPoint e fotos nela, organizados por ensaio.", st_body_ios:"Neste dispositivo, cada exportação abre a folha de Compartilhamento — toque em “Salvar em Arquivos” → No meu iPhone › FieldBook Pro. Seu trabalho é sempre salvo automaticamente no app.", st_body_dl:"As exportações são salvas na pasta Downloads do navegador. Seu trabalho é sempre salvo automaticamente no app.", st_choose:"Escolher pasta", st_gotit:"Entendi", st_later:"Depois", st_note:"Você pode alterar isso quando quiser em Armazenamento e dados.", saved_title:"Salvo em:", saved_ok:"Confirmar" },
+    id:{ st_title:"Pilih tempat berkas disimpan", st_body_fsa:"Pilih folder sekali. FieldBook Pro akan menyimpan CSV, Excel, PowerPoint, dan foto di dalamnya, tertata per uji coba.", st_body_ios:"Di perangkat ini, setiap ekspor membuka lembar Bagikan — ketuk “Simpan ke File” → Di iPhone Saya › FieldBook Pro. Pekerjaan Anda selalu tersimpan otomatis di aplikasi.", st_body_dl:"Ekspor disimpan ke folder Unduhan browser. Pekerjaan Anda selalu tersimpan otomatis di aplikasi.", st_choose:"Pilih folder", st_gotit:"Mengerti", st_later:"Nanti", st_note:"Anda dapat mengubahnya kapan saja di Penyimpanan & data.", saved_title:"Disimpan ke:", saved_ok:"Konfirmasi" },
+    vi:{ st_title:"Chọn nơi lưu tệp", st_body_fsa:"Chọn thư mục một lần. FieldBook Pro sẽ lưu CSV, Excel, PowerPoint và ảnh vào đó, sắp xếp theo từng thử nghiệm.", st_body_ios:"Trên thiết bị này, mỗi lần xuất sẽ mở bảng Chia sẽ — chạm “Lưu vào Tệp” → Trên iPhone của tôi › FieldBook Pro. Dữ liệu luôn được tự động lưu trong ứng dụng.", st_body_dl:"Tệp xuất được lưu vào thư mục Tải xuống của trình duyệt. Dữ liệu luôn được tự động lưu trong ứng dụng.", st_choose:"Chọn thư mục", st_gotit:"Đã hiểu", st_later:"Để sau", st_note:"Bạn có thể thay đổi bất kỳ lúc nào trong Lưu trữ & dữ liệu.", saved_title:"Đã lưu vào:", saved_ok:"Xác nhận" },
+    fr:{ st_title:"Choisissez où les fichiers sont enregistrés", st_body_fsa:"Choisissez un dossier une fois. FieldBook Pro y enregistrera les CSV, Excel, PowerPoint et photos, organisés par essai.", st_body_ios:"Sur cet appareil, chaque export ouvre la feuille de Partage — touchez « Enregistrer dans Fichiers » → Sur mon iPhone › FieldBook Pro. Votre travail est toujours enregistré automatiquement dans l’app.", st_body_dl:"Les exports sont enregistrés dans le dossier Téléchargements du navigateur. Votre travail est toujours enregistré automatiquement dans l’app.", st_choose:"Choisir un dossier", st_gotit:"Compris", st_later:"Plus tard", st_note:"Vous pouvez le modifier à tout moment dans Stockage et données.", saved_title:"Enregistré dans :", saved_ok:"Confirmer" },
+    it:{ st_title:"Scegli dove salvare i file", st_body_fsa:"Scegli una cartella una volta. FieldBook Pro vi salverà CSV, Excel, PowerPoint e foto, organizzati per prova.", st_body_ios:"Su questo dispositivo, ogni esportazione apre il foglio Condividi — tocca “Salva su File” → Su il mio iPhone › FieldBook Pro. Il tuo lavoro viene sempre salvato automaticamente nell’app.", st_body_dl:"Le esportazioni vengono salvate nella cartella Download del browser. Il tuo lavoro viene sempre salvato automaticamente nell’app.", st_choose:"Scegli cartella", st_gotit:"Ho capito", st_later:"Più tardi", st_note:"Puoi cambiarlo quando vuoi in Archiviazione e dati.", saved_title:"Salvato in:", saved_ok:"Conferma" },
+    de:{ st_title:"Wählen Sie den Speicherort für Dateien", st_body_fsa:"Wählen Sie einmal einen Ordner. FieldBook Pro speichert CSV, Excel, PowerPoint und Fotos darin — nach Versuch geordnet.", st_body_ios:"Auf diesem Gerät öffnet jeder Export das Teilen-Blatt — tippen Sie auf „In Dateien sichern“ → Auf meinem iPhone › FieldBook Pro. Ihre Arbeit wird immer automatisch in der App gespeichert.", st_body_dl:"Exporte werden im Downloads-Ordner des Browsers gespeichert. Ihre Arbeit wird immer automatisch in der App gespeichert.", st_choose:"Ordner wählen", st_gotit:"Verstanden", st_later:"Später", st_note:"Sie können dies jederzeit unter Speicher & Daten ändern.", saved_title:"Gespeichert unter:", saved_ok:"Bestätigen" }
+  };
+  for(var lang in A){ if(I18N[lang]){ var o=A[lang]; for(var k in o){ if(I18N[lang][k]===undefined) I18N[lang][k]=o[k]; } } }
+  // Any other language tables fall back to English for these keys.
+  for(var L in I18N){ if(!A[L]){ var e=A.en; for(var k2 in e){ if(I18N[L][k2]===undefined) I18N[L][k2]=e[k2]; } } }
+})();
+
 function t(key, vars){
   var d = I18N[CUR_LANG] || I18N.en;
   var v = d[key];
@@ -3500,7 +3800,7 @@ function fbAutosaveTick(){
 }
 function startAutosave(){
   if(_fbAutosaveTimer) return;
-  _fbAutosaveTimer=setInterval(fbAutosaveTick, 3000);   // every 3 seconds
+  _fbAutosaveTimer=setInterval(fbAutosaveTick, 2000);   // every 2 seconds
   // Flush immediately when app is backgrounded / closed — the real crash guard.
   var flush=function(){ try{
     _fbAutosaveDirty=true; LS.set('state', ST); LS.set('state_bak', ST); LS.set('state_bak_ts', Date.now());
@@ -3551,6 +3851,94 @@ function fbDownloadedMsg(fname){
   }catch(e){}
   return t('downloaded_generic',{f:fname});
 }
+
+/* ===== v20: unified export storage + popups (web PWA, all browsers) ===== */
+function fbStoreCap(){ try{ return (window.fbWeb && fbWeb.capability) ? fbWeb.capability() : 'download'; }catch(e){ return 'download'; } }
+
+/* ---- Saved-to confirmation popup (explicit exports only) ---- */
+function fbShowSavedTo(displayPath){
+  try{
+    var ov=document.getElementById('fb_savedto_ov'); if(!ov){ toast(t('saved_title')+' '+displayPath); return; }
+    document.getElementById('fb_savedto_title').textContent=t('saved_title');
+    document.getElementById('fb_savedto_ok').textContent=t('saved_ok');
+    var nice=String(displayPath).split('/').join(' \u203a ');
+    document.getElementById('fb_savedto_path').textContent=nice;
+    ov.classList.add('show');
+  }catch(e){ try{ toast(t('saved_title')+' '+displayPath); }catch(_){} }
+}
+function fbSavedToClose(){ var ov=document.getElementById('fb_savedto_ov'); if(ov) ov.classList.remove('show'); }
+
+/* ---- First-run storage modal ---- */
+var FB_STORE_FLAG='fb_storage_setup_done';
+function fbStorageSetupDone(){ try{ return localStorage.getItem(FB_STORE_FLAG)==='1'; }catch(e){ return false; } }
+function fbMarkStorageSetup(){ try{ localStorage.setItem(FB_STORE_FLAG,'1'); }catch(e){} }
+function fbOpenStorageModal(force){
+  if(fbHasNative() && !(window.FBNative && window.FBNative.__isWebShim)) return;   // real native bridge handles its own folder flow
+  if(!force && fbStorageSetupDone()) return;
+  var ov=document.getElementById('fb_modal_ov'); if(!ov) return;
+  var cap=fbStoreCap();
+  document.getElementById('fb_modal_title').textContent=t('st_title');
+  var bodyEl=document.getElementById('fb_modal_body');
+  var okBtn=document.getElementById('fb_modal_ok');
+  var laterBtn=document.getElementById('fb_modal_later');
+  var noteEl=document.getElementById('fb_modal_note');
+  noteEl.textContent=t('st_note');
+  laterBtn.textContent=t('st_later');
+  if(cap==='fsa'){
+    bodyEl.textContent=t('st_body_fsa');
+    okBtn.textContent=t('st_choose');
+    okBtn.setAttribute('data-act','pick');
+  } else if(cap==='share'){
+    bodyEl.textContent=t('st_body_ios');
+    okBtn.textContent=t('st_gotit');
+    okBtn.setAttribute('data-act','ack');
+  } else {
+    bodyEl.textContent=t('st_body_dl');
+    okBtn.textContent=t('st_gotit');
+    okBtn.setAttribute('data-act','ack');
+  }
+  ov.classList.add('show');
+}
+function fbStorageModalLater(){ var ov=document.getElementById('fb_modal_ov'); if(ov) ov.classList.remove('show'); /* do not mark done: ask again next launch */ }
+function fbStorageModalChoose(){
+  var okBtn=document.getElementById('fb_modal_ok');
+  var act=okBtn?okBtn.getAttribute('data-act'):'ack';
+  var ov=document.getElementById('fb_modal_ov');
+  if(act==='pick' && window.fbWeb && fbWeb.pickDir){
+    fbWeb.pickDir().then(function(ok){
+      if(ok){ fbMarkStorageSetup(); if(ov) ov.classList.remove('show'); try{ toast(t('saf_pick_ok')); }catch(e){} fbRefreshStorageLabel(); }
+      /* if user cancelled the picker, leave modal open so they can retry */
+    });
+  } else {
+    fbMarkStorageSetup(); if(ov) ov.classList.remove('show');
+  }
+}
+function fbRefreshStorageLabel(){
+  try{ var el=document.getElementById('set_storage_cur'); if(!el) return;
+    if(fbHasNative()&&!(window.FBNative&&window.FBNative.__isWebShim)&&window.FBNative.folderName){ el.textContent=window.FBNative.folderName()||'\u2014'; return; }
+    var cap=fbStoreCap();
+    el.textContent = cap==='fsa' ? (fbWeb.hasChosenDir()?'FieldBook Pro (chosen folder)':t('saf_not_set'))
+                   : cap==='share' ? 'iPhone / iPad \u2013 Save to Files' : t('saf_web_mode');
+  }catch(e){}
+}
+
+/* ---- Unified logical-path export (web). Builds blob, writes via best tier,
+        shows the Saved-to popup. kind matches the app convention. ---- */
+function fbExportLogical(logicalPath, content, kind){
+  try{
+    if(!(window.fbWeb)){ return false; }
+    var fname=String(logicalPath).split('/').pop();
+    var blob=fbWeb.toBlob(content, kind, fname);
+    fbWeb.writeLogical(logicalPath, blob).then(function(res){
+      if(res && res.ok){ fbShowSavedTo(res.display||logicalPath); }
+      else if(res && res.needDir){ fbOpenStorageModal(true); }
+      else if(res && res.cancelled){ /* user cancelled iOS share; silent, data still in app */ }
+      else { try{ toast(t('downloaded_generic',{f:fname}),true); }catch(e){} }
+    });
+    return true;
+  }catch(e){ return false; }
+}
+
 function fbBuildMeta(){
   return {
     folder:fbTrialFolder(),
@@ -3563,7 +3951,8 @@ function fbBuildMeta(){
 }
 function fbHasNative(){ return !!(window.FBNative); }
 function fbRepickFolder(){
-  if(!(window.FBNative && window.FBNative.repickFolder)){ toast(t('saf_web_mode'),true); return; }
+  if(window.FBNative && window.FBNative.__isWebShim){ try{ fbOpenStorageModal(true); return; }catch(e){} }
+  if(!(window.FBNative && window.FBNative.repickFolder)){ try{ fbOpenStorageModal(true); }catch(e){ toast(t('saf_web_mode'),true); } return; }
   window.__fbAfterRepick=function(){
     try{
       if(window.FBNative.migrateData){
@@ -5335,8 +5724,17 @@ function renderValRpt(v){
 function buildCSV(){
   var __agro=(window.isAgro&&window.isAgro());
 
-  var hdr=t('csv_hdr').slice();
-  if(__agro){ var __oi=hdr.indexOf('Observation'); if(__oi<0){ for(var __k=0;__k<hdr.length;__k++){ if(/observ|观察|观测|pengamatan|quan|osserv|beobacht/i.test(hdr[__k])){__oi=__k;break;} } } if(__oi<0)__oi=13; hdr.splice(__oi+1,0,'Eval.Type'); }
+  /* ---- CSV headers: force ENGLISH machine headers for ALL languages (Option C).
+     EXACTLY ONE header row is emitted (downstream parsers expect a single header
+     row), using I18N.en.csv_hdr with 'trial','rep','treatment','value' lowercased.
+     No localized caption row is added — localized labels live in the Excel export
+     instead, so the CSV header stays consistent and machine-readable in every
+     language. Applies to BOTH IFS and Agronomy. ---- */
+  var __en=(typeof I18N==='object' && I18N.en && I18N.en.csv_hdr) ? I18N.en.csv_hdr.slice() : t('csv_hdr').slice();
+  if(__agro){
+    var __oi=__en.indexOf('Observation'); if(__oi<0)__oi=13; __en.splice(__oi+1,0,'Eval.Type');
+  }
+  var hdr=__en;
   var rows=[hdr];
   var order=plotsInOrder();
   ST.obs.forEach(function(o){
@@ -5369,6 +5767,16 @@ function buildCSV(){
       });
     });
   });
+  /* Agronomy ONLY: remove GPS_Lat, GPS_Lon columns (base indices 4,5) from the
+     header row AND every data row, uniformly, so columns stay aligned.
+     Location (index 3) is KEPT (mandatory Province/Location field). IFS keeps
+     the full column set. These indices sit before the Eval.Type column (inserted
+     at index 14), so dropping them never disturbs later columns. */
+  if(__agro){
+    for(var __ri=0; __ri<rows.length; __ri++){
+      if(rows[__ri] && rows[__ri].length>5){ rows[__ri].splice(4,2); }
+    }
+  }
   return rows.map(function(r){ return r.map(function(c){
     var s=(c===null||c===undefined)?'':String(c);
     if(s.indexOf(',')>-1||s.indexOf('"')>-1||s.indexOf('\n')>-1) return '"'+s.replace(/"/g,'""')+'"';
@@ -5664,16 +6072,17 @@ function downloadXLSX(){
       var len=(c===null||c===undefined)?0:String(c).length; if(!w[ci]||len>w[ci]) w[ci]=len; }); });
       return w.map(function(L){ return {wch: Math.min(60, Math.max(8,(L||0)+2))}; }); }
     function _addSheet(aoa,name){ var ws=XLSX.utils.aoa_to_sheet(aoa); ws['!cols']=_autoCols(aoa); XLSX.utils.book_append_sheet(wb,ws,name); }
+    var __agroX=(window.isAgro&&window.isAgro()); /* Agronomy: blank removed fields (Product/Pest/GPS) in Trial Info sheet */
     var info=[[t('xlsx_field'),t('xlsx_value')],
       [t('ti_protocol'),ST.proto],[t('ti_trial'),ST.trial],[t('ti_crop'),ST.crop],
-      [t('ti_product'),ST.product],[t('ti_pest'),ST.pest],[t('ti_loc'),ST.loc],
+      [t('ti_product'),__agroX?'':ST.product],[t('ti_pest'),__agroX?'':ST.pest],[t('ti_loc'),ST.loc],
       [t('ti_soil'),ST.soil],[t('ti_sow'),ST.sow],
-      [t('ti_gps_lat'),ST.gps?ST.gps.lat:''],[t('ti_gps_lon'),ST.gps?ST.gps.lon:''],
-      [t('ti_gps_acc'),ST.gps?ST.gps.acc:''],[t('ti_gps_alt'),ST.gps?(ST.gps.alt||''):''],[t('ti_gps_time'),ST.gps?ST.gps.time:''],
-      ['GPS '+t('corner_tl'),ST.gpsCorners&&ST.gpsCorners.tl?ST.gpsCorners.tl.lat+', '+ST.gpsCorners.tl.lon:''],
-      ['GPS '+t('corner_tr'),ST.gpsCorners&&ST.gpsCorners.tr?ST.gpsCorners.tr.lat+', '+ST.gpsCorners.tr.lon:''],
-      ['GPS '+t('corner_bl'),ST.gpsCorners&&ST.gpsCorners.bl?ST.gpsCorners.bl.lat+', '+ST.gpsCorners.bl.lon:''],
-      ['GPS '+t('corner_br'),ST.gpsCorners&&ST.gpsCorners.br?ST.gpsCorners.br.lat+', '+ST.gpsCorners.br.lon:''],
+      [t('ti_gps_lat'),__agroX?'':(ST.gps?ST.gps.lat:'')],[t('ti_gps_lon'),__agroX?'':(ST.gps?ST.gps.lon:'')],
+      [t('ti_gps_acc'),__agroX?'':(ST.gps?ST.gps.acc:'')],[t('ti_gps_alt'),__agroX?'':(ST.gps?(ST.gps.alt||''):'')],[t('ti_gps_time'),__agroX?'':(ST.gps?ST.gps.time:'')],
+      ['GPS '+t('corner_tl'),__agroX?'':(ST.gpsCorners&&ST.gpsCorners.tl?ST.gpsCorners.tl.lat+', '+ST.gpsCorners.tl.lon:'')],
+      ['GPS '+t('corner_tr'),__agroX?'':(ST.gpsCorners&&ST.gpsCorners.tr?ST.gpsCorners.tr.lat+', '+ST.gpsCorners.tr.lon:'')],
+      ['GPS '+t('corner_bl'),__agroX?'':(ST.gpsCorners&&ST.gpsCorners.bl?ST.gpsCorners.bl.lat+', '+ST.gpsCorners.bl.lon:'')],
+      ['GPS '+t('corner_br'),__agroX?'':(ST.gpsCorners&&ST.gpsCorners.br?ST.gpsCorners.br.lat+', '+ST.gpsCorners.br.lon:'')],
       [t('ti_trts'),ST.nT],[t('ti_reps'),ST.nR],[t('ti_utc'),ST.utc],
       [t('ti_app_dates'),(ST.appDates||[]).join('; ')],
       [t('ti_pm'),ST.plotMode==='arm'?t('pm_arm_label'):t('pm_tr_label')],
@@ -6333,10 +6742,13 @@ window.addEventListener('DOMContentLoaded', function(){
   ensureDefaults();
   applyI18n();
   refreshAll();
-  startAutosave();                     // Item 4: begin 3s background autosave
+  startAutosave();                     // Item 4: begin 2s background autosave
   var _resume=(ST.lastNav && ['setup','entry','prog','sum','exp','dose','about','settings'].indexOf(ST.lastNav)>=0)?ST.lastNav:'home';
   navTo(_resume);                      // Item 4: resume exactly where the user left off
   try{ renderRecentFiles(); }catch(e){}
+  /* v20: hydrate chosen dir handle, refresh label, and show first-run storage prompt. */
+  try{ if(window.fbWeb && fbWeb.loadHandle){ fbWeb.loadHandle().then(function(){ try{ fbRefreshStorageLabel(); }catch(e){} }); } else { fbRefreshStorageLabel(); } }catch(e){}
+  try{ setTimeout(function(){ try{ fbOpenStorageModal(false); }catch(e){} }, 600); }catch(e){}
   if(typeof dzTab==='function') dzTab(1);
   try{
     var _pin=document.getElementById('auth_pin_in'); if(_pin) _pin.addEventListener('keydown',function(e){ if(e.key==='Enter') authLogin(); });
@@ -6651,7 +7063,8 @@ var AGRO_I18N={
   agro_manual_formula:{en:"Manual formula (optional)",es419:"Fórmula manual (opcional)",pt:"Fórmula manual (opcional)",zh:"自定义公式（可选）",id:"Rumus manual (opsional)",vi:"Công thức thủ công (tùy chọn)",fr:"Formule manuelle (facultatif)",it:"Formula manuale (opzionale)",de:"Manuelle Formel (optional)"},
   agro_manual_hint:{en:"Applied per treatment. Variables: V=value(mean of subsamples), C=control mean. Funcs: min,max,abs,sqrt,ln,log,exp. Example: V/C*100",es419:"Se aplica por tratamiento. Variables: V=valor (media de submuestras), C=media del control. Func.: min,max,abs,sqrt,ln,log,exp. Ej.: V/C*100",pt:"Aplicada por tratamento. Variáveis: V=valor (média das subamostras), C=média do controle. Funções: min,max,abs,sqrt,ln,log,exp. Ex.: V/C*100",zh:"按处理应用。变量：V=值（子样本均值），C=对照均值。函数：min,max,abs,sqrt,ln,log,exp。例：V/C*100",id:"Diterapkan per perlakuan. Variabel: V=nilai (rata-rata subsampel), C=rata-rata kontrol. Fungsi: min,max,abs,sqrt,ln,log,exp. Contoh: V/C*100",vi:"Áp dụng cho từng nghiệm thức. Biến: V=giá trị (trung bình mẫu phụ), C=trung bình đối chứng. Hàm: min,max,abs,sqrt,ln,log,exp. Ví dụ: V/C*100",fr:"Appliquée par traitement. Variables : V=valeur (moyenne des sous-échantillons), C=moyenne du témoin. Fonctions : min,max,abs,sqrt,ln,log,exp. Exemple : V/C*100",it:"Applicata per trattamento. Variabili: V=valore (media dei sottocampioni), C=media del controllo. Funzioni: min,max,abs,sqrt,ln,log,exp. Esempio: V/C*100",de:"Pro Behandlung angewendet. Variablen: V=Wert (Mittel der Teilproben), C=Kontrollmittel. Funktionen: min,max,abs,sqrt,ln,log,exp. Beispiel: V/C*100"},
   agro_no_data_chart:{en:"No data for this interval yet.",es419:"Aún no hay datos para este intervalo.",pt:"Ainda não há dados para este intervalo.",zh:"该间隔暂无数据。",id:"Belum ada data untuk interval ini.",vi:"Chưa có dữ liệu cho kỳ này.",fr:"Aucune donnée pour cet intervalle.",it:"Nessun dato per questo intervallo.",de:"Noch keine Daten für dieses Intervall."},
-  agro_evaltype:{en:"Eval.Type",es419:"Eval.Type",pt:"Eval.Type",zh:"Eval.Type",id:"Eval.Type",vi:"Eval.Type",fr:"Eval.Type",it:"Eval.Type",de:"Eval.Type"}
+  agro_evaltype:{en:"Eval.Type",es419:"Eval.Type",pt:"Eval.Type",zh:"Eval.Type",id:"Eval.Type",vi:"Eval.Type",fr:"Eval.Type",it:"Eval.Type",de:"Eval.Type"},
+  agro_province_location:{en:"Province/Location",es419:"Provincia/Ubicación",pt:"Província/Local",zh:"省/位置",id:"Provinsi/Lokasi",vi:"Tỉnh/Địa điểm",fr:"Province/Emplacement",it:"Provincia/Posizione",de:"Provinz/Standort"}
 };
 function at(k){
   var cur=(typeof CUR_LANG!=='undefined')?CUR_LANG:'en';
@@ -6708,6 +7121,55 @@ window.agroStart=function(type){
   navTo('setup');
 };
 
+/* ------------------------------------------------------------------
+   AGRONOMY metadata simplification (agro mode ONLY; fully reversible).
+   Hides/relabels only within the Setup screen. IFS is never affected
+   because this is called with on=false (restore) whenever IFS is active.
+   - Product / Target Pest rows: hidden via CSS (.agro-hide-row) -> handled
+     by the markup; here we also clear any stray values so they never leak
+     into Agronomy exports.
+   - GPS accordion (#acc-gps): hidden via CSS in agro mode.
+   - Location label -> "Province/Location" in agro; restored for IFS.
+   - Trial Map graphics/preview + walking pattern + layout actions: tagged
+     .agro-map-hide so only Plot-numbering mode and the LPT/RBD layout
+     selector remain. Untagged (restored) for IFS.
+------------------------------------------------------------------ */
+function agroSimplifyMeta(on){
+  try{
+    // 1) Location label text
+    var locLbl=document.getElementById('s_loc_lbl');
+    if(locLbl){
+      if(on){ locLbl.removeAttribute('data-i18n'); locLbl.textContent=at('agro_province_location'); }
+      else  { locLbl.setAttribute('data-i18n','location'); try{ locLbl.textContent=(typeof t==='function')?t('location'):'Location'; }catch(e){ locLbl.textContent='Location'; } }
+    }
+    // 2) Trial Map: keep only Numbering + LPT/RBD selector in agro mode.
+    var accMap=document.getElementById('acc-tmap');
+    var mapIn=accMap?accMap.querySelector('.acc-in'):null;
+    if(mapIn){
+      // Elements that are map GRAPHICS / preview / walking / RBD actions.
+      var walkLbl=mapIn.querySelector('label[data-i18n="walk_pattern"]');
+      var walkRow=walkLbl?walkLbl.nextElementSibling:null; // the pm-row with sp-norm/sp-serp
+      var tips=mapIn.querySelector('.tm-help');
+      var prevLbl=mapIn.querySelector('label[data-i18n="map_preview"]');
+      var fittog=document.getElementById('tm_fittog');
+      var mapWrap=mapIn.querySelector('.tm-wrap');
+      var actLbl=mapIn.querySelector('label[data-i18n="layout_actions"]');
+      var actBlk=mapIn.querySelector('.tm-actions');
+      [walkLbl,walkRow,tips,prevLbl,fittog,mapWrap,actLbl,actBlk].forEach(function(el){
+        if(!el) return;
+        if(on) el.classList.add('agro-map-hide');
+        else   el.classList.remove('agro-map-hide');
+      });
+    }
+    // 3) Prevent removed fields leaking into Agronomy data on save.
+    if(on){
+      if(ST){ ST.product=''; ST.pest=''; }
+      var pEl=document.getElementById('s_product'); if(pEl) pEl.value='';
+      var tEl=document.getElementById('s_pest');    if(tEl) tEl.value='';
+    }
+  }catch(e){}
+}
+
 /* toggle DOM visibility of agro-only vs ifs-only blocks */
 function agroApplyMode(){
   var on=isAgro();
@@ -6716,6 +7178,7 @@ function agroApplyMode(){
   if(on){
     // build/refresh the agro setup panel + map layout selector
     agroRenderSetup(); agroSyncMapLayout();
+    agroSimplifyMeta(true);
   } else {
     // restore IFS obs editor if we previously hid it
     var obsList=document.getElementById('obs_list');
@@ -6737,6 +7200,7 @@ function agroApplyMode(){
       var dscI=accMap.querySelector('[data-i18n="rbd_desc"]');
       if(dscI){ try{ dscI.textContent=(typeof t==='function')?t('rbd_desc'):''; }catch(e){} }
     }
+    agroSimplifyMeta(false);
   }
 }
 
@@ -6985,7 +7449,7 @@ window.agroSetLayout=function(lay){
    ANALYSIS (Agronomy): replace stats with bar / box charts
    X=treatment, Y=value; navigate intervals; fit to page; manual formula
 ============================================================ */
-var AGRO_CHART={obsIdx:0, tpIdx:0, kind:'bar'};
+var AGRO_CHART={obsIdx:0, tpIdx:0, kind:'box'}; /* Agronomy: Box plot only (Bar graph removed) */
 
 function agroBuildAnalysisUI(){
   var pg=document.getElementById('pg-summary'); if(!pg) return;
@@ -7003,9 +7467,9 @@ function agroBuildAnalysisUI(){
   h+='<label>'+at('agro_sel_obs')+'</label>';
   h+='<select id="agro_ch_obs" onchange="agroChartSet(\'obs\',this.value)">'+
      obsList.map(function(o,i){return '<option value="'+i+'"'+(i===AGRO_CHART.obsIdx?' selected':'')+'>'+esc(o)+(ST.evalType[o]?(' ['+ST.evalType[o]+']'):'')+'</option>';}).join('')+'</select>';
-  h+='<div class="agro-ch-kind">'+
-     '<button type="button" class="btn '+(AGRO_CHART.kind==='bar'?'bb':'bs')+'" onclick="agroChartSet(\'kind\',\'bar\')">'+at('agro_chart_bar')+'</button>'+
-     '<button type="button" class="btn '+(AGRO_CHART.kind==='box'?'bb':'bs')+'" onclick="agroChartSet(\'kind\',\'box\')">'+at('agro_chart_box')+'</button>'+
+  /* Agronomy: Bar graph removed — Box plot only. Kind selector hidden. */
+  h+='<div class="agro-ch-kind" style="display:none">'+
+     '<button type="button" class="btn bb">'+at('agro_chart_box')+'</button>'+
      '</div>';
   h+='<div class="agro-ch-nav">'+
      '<button type="button" class="btn bs" onclick="agroChartNav(-1)">'+at('agro_prev_int')+'</button>'+
