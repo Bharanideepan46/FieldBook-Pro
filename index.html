@@ -4462,6 +4462,10 @@ function computeDAT(tp){
   return null;
 }
 function renderTpList(){
+  if(typeof isAgro==='function' && isAgro()){
+    if(typeof agroRenderIntervals==='function') agroRenderIntervals();
+    return;
+  }
   var c=document.getElementById('tp_list'); if(!c) return;
   c.innerHTML='';
   ST.tps.forEach(function(tp,i){
@@ -7356,7 +7360,12 @@ var AGRO_I18N={
   agro_int_custom_q:{en:"Custom DA- suffix (e.g. X, 2A):",es419:"Sufijo DA- personalizado (p. ej. X, 2A):",pt:"Sufixo DA- personalizado (ex. X, 2A):",zh:"自定义 DA- 后缀（例如 X、2A）：",id:"Akhiran DA- khusus (mis. X, 2A):",vi:"Hậu tố DA- tùy chỉnh (vd. X, 2A):",fr:"Suffixe DA- personnalisé (ex. X, 2A) :",it:"Suffisso DA- personalizzato (es. X, 2A):",de:"Eigenes DA--Suffix (z. B. X, 2A):"},
   agro_int_blank_q:{en:"Interval label:",es419:"Etiqueta del intervalo:",pt:"Rótulo do intervalo:",zh:"间隔标签：",id:"Label interval:",vi:"Nhãn khoảng:",fr:"Étiquette de l'intervalle :",it:"Etichetta intervallo:",de:"Intervall-Bezeichnung:"},
   agro_int_del_data_q:{en:"This interval has recorded data. Delete it anyway?",es419:"Este intervalo tiene datos. ¿Eliminarlo de todos modos?",pt:"Este intervalo tem dados. Excluir mesmo assim?",zh:"该间隔已有数据。仍要删除吗？",id:"Interval ini punya data. Tetap hapus?",vi:"Khoảng này đã có dữ liệu. Vẫn xóa?",fr:"Cet intervalle contient des données. Supprimer quand même ?",it:"Questo intervallo ha dati. Eliminare comunque?",de:"Dieses Intervall enthält Daten. Trotzdem löschen?"},
-  agro_int_kept_data:{en:"Kept an extra interval because it has data. Remove it manually if intended.",es419:"Se conservó un intervalo adicional porque tiene datos. Elimínelo manualmente si corresponde.",pt:"Um intervalo extra foi mantido por conter dados. Remova-o manualmente se desejar.",zh:"保留了一个含数据的额外间隔。如需请手动删除。",id:"Interval tambahan dipertahankan karena berisi data. Hapus manual jika memang diinginkan.",vi:"Đã giữ một khoảng thêm vì có dữ liệu. Xóa thủ công nếu muốn.",fr:"Un intervalle supplémentaire a été conservé car il contient des données. Supprimez-le manuellement si besoin.",it:"È stato mantenuto un intervallo extra perché contiene dati. Rimuovilo manualmente se necessario.",de:"Ein zusätzliches Intervall wurde beibehalten, da es Daten enthält. Bei Bedarf manuell entfernen."}
+  agro_int_kept_data:{en:"Kept an extra interval because it has data. Remove it manually if intended.",es419:"Se conservó un intervalo adicional porque tiene datos. Elimínelo manualmente si corresponde.",pt:"Um intervalo extra foi mantido por conter dados. Remova-o manualmente se desejar.",zh:"保留了一个含数据的额外间隔。如需请手动删除。",id:"Interval tambahan dipertahankan karena berisi data. Hapus manual jika memang diinginkan.",vi:"Đã giữ một khoảng thêm vì có dữ liệu. Xóa thủ công nếu muốn.",fr:"Un intervalle supplémentaire a été conservé car il contient des données. Supprimez-le manuellement si besoin.",it:"È stato mantenuto un intervallo extra perché contiene dati. Rimuovilo manualmente se necessario.",de:"Ein zusätzliches Intervall wurde beibehalten, da es Daten enthält. Bei Bedarf manuell entfernen."},
+  agro_add_special_int:{en:"➕ Add Assessment Interval",es419:"➕ Agregar intervalo de evaluación",pt:"➕ Adicionar intervalo de avaliação",zh:"➕ 添加评估时间点/间隔",id:"➕ Tambah Interval Penilaian",vi:"➕ Thêm khoảng đánh giá",fr:"➕ Ajouter un intervalle d'évaluation",it:"➕ Aggiungi intervallo di valutazione",de:"➕ Bewertungsintervall hinzufügen"},
+  agro_btn_planting:{en:"🌱 DA-Planting",es419:"🌱 DA-Planting",pt:"🌱 DA-Planting",zh:"🌱 DA-Planting",id:"🌱 DA-Planting",vi:"🌱 DA-Planting",fr:"🌱 DA-Planting",it:"🌱 DA-Planting",de:"🌱 DA-Planting"},
+  agro_btn_emergence:{en:"🌿 DA-Emergence",es419:"🌿 DA-Emergence",pt:"🌿 DA-Emergence",zh:"🌿 DA-Emergence",id:"🌿 DA-Emergence",vi:"🌿 DA-Emergence",fr:"🌿 DA-Emergence",it:"🌿 DA-Emergence",de:"🌿 DA-Emergence"},
+  agro_btn_custom_da:{en:"➕ Custom DA-x",es419:"➕ DA-x personalizado",pt:"➕ DA-x personalizado",zh:"➕ 自定义 DA-x",id:"➕ DA-x Khusus",vi:"➕ DA-x tùy chỉnh",fr:"➕ DA-x personnalisé",it:"➕ DA-x personalizzato",de:"➕ Eigenes DA-x"},
+  agro_btn_custom_lbl:{en:"📝 Custom Label",es419:"📝 Etiqueta personalizada",pt:"📝 Rótulo personalizado",zh:"📝 自定义名称",id:"📝 Label Khusus",vi:"📝 Nhãn tùy chỉnh",fr:"📝 Libellé personnalisé",it:"📝 Etichetta personalizzata",de:"📝 Eigene Bezeichnung"}
 };
 function at(k){
   var cur=(typeof CUR_LANG!=='undefined')?CUR_LANG:'en';
@@ -7507,15 +7516,18 @@ function agroApplyMode(){
   document.body.classList.toggle('agro-mode', on);
   document.body.classList.toggle('ifs-mode', !on);
   if(on){
-    // build/refresh the agro setup panel + map layout selector
+    // build/refresh the agro setup panel + map layout selector + intervals
     agroRenderSetup(); agroSyncMapLayout();
     agroSimplifyMeta(true);
+    if(typeof agroRenderIntervals==='function') agroRenderIntervals();
   } else {
     // restore IFS obs editor if we previously hid it
     var obsList=document.getElementById('obs_list');
     if(obsList){ obsList.style.display=''; var addRow=obsList.nextElementSibling; if(addRow) addRow.style.display=''; }
     var ah=document.getElementById('agro_setup_host'); if(ah) ah.remove();
     var ml=document.getElementById('agro_maplayout_host'); if(ml) ml.remove();
+    var nt=document.getElementById('new_tp'); if(nt&&nt.parentNode) nt.parentNode.style.display='';
+    if(typeof renderTpList==='function') try{ renderTpList(); }catch(e){}
     // restore IFS Trial Map "Layout actions" that LPT mode may have hidden
     // restore IFS Trial Map "Layout actions" that LPT mode may have hidden
     var accMap=document.getElementById('acc-tmap');
@@ -8081,7 +8093,11 @@ wrap('loadST', function(){
 wrap('navTo', function(name){
   agroApplyMode();
   if(isAgro()){
-    if(name==='setup'){ agroRenderSetup(); agroSyncMapLayout(); }
+    if(name==='setup'){
+      agroRenderSetup();
+      agroSyncMapLayout();
+      if(typeof agroRenderIntervals==='function') agroRenderIntervals();
+    }
     if(name==='sum'){ agroBuildAnalysisUI(); }
   }
 });
@@ -8092,7 +8108,7 @@ wrap('navTo', function(name){
 wrap('setLang', function(){
   agroInjectAbout();
   if(isAgro()){
-    try{ agroRenderSetup(); agroSyncMapLayout(); }catch(e){}
+    try{ agroRenderSetup(); agroSyncMapLayout(); if(typeof agroRenderIntervals==='function') agroRenderIntervals(); }catch(e){}
     try{ if(document.getElementById('agro_chart_host')) agroBuildAnalysisUI(); }catch(e){}
   }
 });
@@ -8315,7 +8331,8 @@ window.agroSetTpDay=function(idx, val){
   idx=parseInt(idx); if(isNaN(idx)||idx<0||idx>=ST.tps.length) return;
   var td=agroTpDays();
   var oldLabel=ST.tps[idx];
-  var m=String(oldLabel).match(/^(?:(\d+)\s+)?(.*)$/); var code=(m?m[2]:oldLabel).trim();
+  var m=String(oldLabel).match(/^(\d+)\s*(.*)$/); var code=(m&&m[2]?m[2]:oldLabel).trim();
+  if(!code) code=oldLabel;
   var day=(val===''||val==null)?'':(parseInt(val,10));
   if(day!=='' && (isNaN(day)||day<0)) day='';
   var newLabel=agroIntLabel(day, code);
@@ -8339,26 +8356,41 @@ window.agroRemoveInterval=function(idx){
 function agroRenderIntervals(){
   var c=document.getElementById('tp_list'); if(!c) return;
   var td=agroTpDays();
+  if(ST.nApps==null || ST.nApps===''){
+    var daCount=0;
+    (ST.tps||[]).forEach(function(tp){
+      if(/\bDA-[A-Z]\b/i.test(tp) || /\bDAA\d+\b/i.test(tp)) daCount++;
+    });
+    if(daCount > 0) ST.nApps=daCount;
+  }
   var h='';
-  h+='<div class="agro-int-apps" style="margin-bottom:10px">';
-  h+='<label style="display:block;font-size:13px;margin-bottom:4px">'+at('agro_napps')+'</label>';
-  h+='<input id="agro_napps" type="number" inputmode="numeric" min="0" max="26" step="1" style="width:100%" value="'+((ST.nApps!=null)?ST.nApps:'')+'" onchange="agroGenIntervals(this.value)">';
-  h+='<div class="agro-hint" style="margin-top:3px">'+at('agro_napps_hint')+'</div>';
+  h+='<div class="agro-int-apps" style="margin-bottom:12px;background:#f9fbf9;padding:12px;border-radius:8px;border:1px solid #dceed0">';
+  h+='<label style="display:block;font-size:13px;font-weight:700;margin-bottom:4px;color:var(--g)">'+at('agro_napps')+'</label>';
+  h+='<input id="agro_napps" type="number" inputmode="numeric" min="0" max="26" step="1" style="width:100%" value="'+((ST.nApps!=null)?ST.nApps:'')+'" placeholder="e.g. 2" oninput="agroGenIntervals(this.value)" onchange="agroGenIntervals(this.value)">';
+  h+='<div class="agro-hint" style="margin-top:4px;font-size:11px;color:#666">'+at('agro_napps_hint')+'</div>';
   h+='</div>';
   h+='<div id="agro_int_rows">';
   (ST.tps||[]).forEach(function(tp,i){
-    var m=String(tp).match(/^(?:(\d+)\s+)?(.*)$/); var day=(m&&m[1]!=null)?m[1]:(td[tp]!=null?td[tp]:''); var code=(m?m[2]:tp).trim();
+    var m=String(tp).match(/^(\d+)\s*(.*)$/);
+    var day=(m&&m[1]!=null)?m[1]:(td[tp]!=null?td[tp]:'');
+    var code=(m&&m[2]?m[2]:tp).trim();
+    if(!code) code=tp;
     h+='<div class="adi" style="display:flex;align-items:center;gap:8px;margin-bottom:6px">';
     h+='<input type="number" inputmode="numeric" min="0" step="1" value="'+(day===''||day==null?'':day)+'" placeholder="#" style="width:64px;text-align:center" oninput="agroSetTpDay('+i+',this.value)" aria-label="days">';
     h+='<div style="flex:1;font-weight:700">'+esc(code)+'</div>';
-    h+='<button type="button" class="adr" onclick="agroRemoveInterval('+i+')">\u00d7</button>';
+    h+='<button type="button" class="adr" onclick="agroRemoveInterval('+i+')" title="Remove interval">\u00d7</button>';
     h+='</div>';
   });
   h+='</div>';
-  // + menu
-  h+='<div class="agro-int-add" style="margin-top:10px">';
-  h+='<button type="button" class="btn bs" onclick="agroIntAddMenu()" style="width:auto;min-width:60px;margin:0;padding:10px 14px">+</button>';
-  h+='</div>';
+  // Dedicated buttons to add DA-Planting, DA-Emergence, etc.
+  h+='<div class="agro-int-add" style="margin-top:14px;padding-top:12px;border-top:1px solid #e0e0e0">';
+  h+='<div style="font-size:12px;font-weight:700;color:var(--g);margin-bottom:8px">'+at('agro_add_special_int')+'</div>';
+  h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">';
+  h+='<button type="button" class="btn bs" onclick="agroAddInterval(\'planting\')" style="margin:0;padding:10px 8px;font-size:12px;font-weight:700">'+at('agro_btn_planting')+'</button>';
+  h+='<button type="button" class="btn bs" onclick="agroAddInterval(\'emergence\')" style="margin:0;padding:10px 8px;font-size:12px;font-weight:700">'+at('agro_btn_emergence')+'</button>';
+  h+='<button type="button" class="btn bs" onclick="agroAddInterval(\'custom\')" style="margin:0;padding:10px 8px;font-size:12px;font-weight:700">'+at('agro_btn_custom_da')+'</button>';
+  h+='<button type="button" class="btn bs" onclick="agroAddInterval(\'blank\')" style="margin:0;padding:10px 8px;font-size:12px;font-weight:700">'+at('agro_btn_custom_lbl')+'</button>';
+  h+='</div></div>';
   c.innerHTML=h;
   var badge=document.getElementById('tp_b'); if(badge) badge.textContent=(ST.tps||[]).length;
   // hide the IFS free-text add row (#new_tp + #btn_aT) in agro mode
