@@ -4537,8 +4537,24 @@ function fbScrollToEntryData(){
 function renderEntry(){
   var oC=document.getElementById('e_obs'); if(!oC) return;
   oC.innerHTML='';
+  if(typeof agroCheckAndMigrateOrphanData==='function') agroCheckAndMigrateOrphanData();
+  if(typeof isAgro==='function' && isAgro() && (!ST.obs || !ST.obs.length)){
+    var dgWrap=document.getElementById('dg_wrap');
+    if(dgWrap){
+      dgWrap.innerHTML='<div style="padding:24px 16px;text-align:center;background:#fffde7;border-radius:12px;margin:16px 0;border:1px solid #ffe082">'+
+        '<div style="font-size:16px;font-weight:700;color:#f57f17;margin-bottom:8px">⚠️ '+at('agro_no_headers_title')+'</div>'+
+        '<div style="font-size:13px;color:#666;margin-bottom:14px">'+at('agro_no_headers_hint')+'</div>'+
+        '<button type="button" class="btn bp" onclick="navTo(\'setup\')" style="width:auto;min-width:140px">'+at('agro_go_setup')+'</button>'+
+        '</div>';
+    }
+    var pgrid=document.getElementById('pgrid'); if(pgrid) pgrid.innerHTML='';
+    document.getElementById('e_pc').textContent='0/0';
+    document.getElementById('e_pf').style.width='0%';
+    return;
+  }
   ST.obs.forEach(function(o){
-    var b=document.createElement('div'); b.className='bi-item obs-b'+(o===ST.curObs?' sel':''); b.textContent=o;
+    var tag = (window.isAgro && window.isAgro() && ST.evalType && ST.evalType[o]) ? ' ['+ST.evalType[o]+']' : '';
+    var b=document.createElement('div'); b.className='bi-item obs-b'+(o===ST.curObs?' sel':''); b.textContent=o+tag;
     b.addEventListener('click', function(){ ST.curObs=o; saveST(); renderEntry(); });
     oC.appendChild(b);
   });
@@ -4919,8 +4935,10 @@ function compressImage(file, cb){
 function renderProgress(){
   var oC=document.getElementById('p_obs'); if(!oC) return;
   oC.innerHTML='';
+  if(typeof agroCheckAndMigrateOrphanData==='function') agroCheckAndMigrateOrphanData();
   ST.obs.forEach(function(o){
-    var b=document.createElement('div'); b.className='bi-item obs-b'+(o===ST.curObs?' sel':''); b.textContent=o;
+    var tag = (window.isAgro && window.isAgro() && ST.evalType && ST.evalType[o]) ? ' ['+ST.evalType[o]+']' : '';
+    var b=document.createElement('div'); b.className='bi-item obs-b'+(o===ST.curObs?' sel':''); b.textContent=o+tag;
     b.onclick=function(){ ST.curObs=o; saveST(); renderProgress(); };
     oC.appendChild(b);
   });
@@ -5183,7 +5201,10 @@ function _trtMeanFor(obsName, trt){
   var all=[];
   for(var r=1;r<=ST.nR;r++){
     var d=ST.data[obsName]&&ST.data[obsName][ST.curTp]&&ST.data[obsName][ST.curTp][plotKey(trt,r)];
-    if(d&&d.values){ d.values.forEach(function(v){ all.push(v); }); }
+    if(d){
+      if(d.values && d.values.length){ d.values.forEach(function(v){ all.push(v); }); }
+      else if(d.cols){ for(var c in d.cols){ (d.cols[c]||[]).forEach(function(v){ all.push(v); }); } }
+    }
   }
   return FBAnalysis.mean(all);
 }
@@ -5191,7 +5212,10 @@ function _trtRatingsFor(obsName, trt){
   var all=[];
   for(var r=1;r<=ST.nR;r++){
     var d=ST.data[obsName]&&ST.data[obsName][ST.curTp]&&ST.data[obsName][ST.curTp][plotKey(trt,r)];
-    if(d&&d.values){ d.values.forEach(function(v){ all.push(v); }); }
+    if(d){
+      if(d.values && d.values.length){ d.values.forEach(function(v){ all.push(v); }); }
+      else if(d.cols){ for(var c in d.cols){ (d.cols[c]||[]).forEach(function(v){ all.push(v); }); } }
+    }
   }
   return all;
 }
@@ -5773,6 +5797,10 @@ function navTo(name){
   if(name==='entry') renderEntry();
   if(name==='prog') renderProgress();
   if(name==='sum') renderSummary();
+  if(name==='exp'){
+    if(typeof agroCheckAndMigrateOrphanData==='function') agroCheckAndMigrateOrphanData();
+    var v=buildValidation(); renderValRpt(v);
+  }
   if(name==='dose'){ if(typeof dzTab==='function') dzTab(1); }
   if(name==='home'){ try{ renderRecentFiles(); }catch(e){} }
   if(name==='settings'){ try{ renderSettings(); }catch(e){} }
@@ -5787,6 +5815,9 @@ function buildValidation(){
   if(!ST.loc) w.push(t('v_loc'));
   if(!ST.sow) w.push(t('v_sow'));
   if(!ST.gps && !(typeof isAgro==='function' && isAgro())) w.push(t('v_gps')); // Wave5 #12a: no GPS warning in Agronomy
+  if(typeof isAgro==='function' && isAgro() && (!ST.obs || !ST.obs.length)){
+    w.push(at('agro_no_headers_warn') || 'No KPI or KPM headers added in Setup');
+  }
   var order=plotsInOrder();
   var totalCells=0, filledCells=0, emptyPlots=[], partialPlots=[], negCount=0;
   ST.obs.forEach(function(o){
@@ -5871,14 +5902,21 @@ function buildCSV(){
               if(d.cols && d.cols[cn]!==undefined && d.cols[cn]!==null){ v=d.cols[cn][i]||''; }
               else if(!multi && d.values){ v=d.values[i]||''; }
             }
-            rows.push([ST.proto, ST.trial, ST.crop, ST.loc,
+            var row=[ST.proto, ST.trial, ST.crop, ST.loc,
               ST.gps?ST.gps.lat:'', ST.gps?ST.gps.lon:'',
               ST.sow, ST.soil, (ST.appDates||[]).join(';'),
               plotDisplay(p.trt,p.rep,p.pos),
               'T'+p.trt+(p.trt===ST.utc?' '+t('utc_short'):''),
-              lbl, 'R'+p.rep, o, (ST.variety||'')]
-              .concat(__agro?[(ST.evalType&&ST.evalType[o])||'']:[])
-              .concat([colName, tp].concat(__agro?[(ST.tpDays&&ST.tpDays[tp]!=null&&ST.tpDays[tp]!=='')?ST.tpDays[tp]:'']:[]).concat([(i+1), v, (i===0&&cn===cols[0])?note:''])));
+              lbl, 'R'+p.rep, o];
+            if(__agro) row.push((ST.evalType&&ST.evalType[o])||'');
+            row.push(colName);
+            row.push(tp);
+            if(__agro) row.push((ST.tpDays&&ST.tpDays[tp]!=null&&ST.tpDays[tp]!=='')?ST.tpDays[tp]:'');
+            row.push(i+1);
+            row.push(v);
+            row.push((i===0&&cn===cols[0])?note:'');
+            row.push(ST.variety||'');
+            rows.push(row);
           }
         });
       });
@@ -5910,9 +5948,11 @@ function saveCSV(csv){
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
 }
 function downloadCSV(){
+  if(typeof agroCheckAndMigrateOrphanData==='function') agroCheckAndMigrateOrphanData();
   var v=buildValidation(); renderValRpt(v);
   if(v.warnings.length){
-    if(!confirm(t('completeness')+': '+Math.round(v.filledCells*100/v.totalCells)+'%\n'+v.warnings.length+' '+t('warnings')+'\n'+t('all_inc')+'\n\n'+t('download_q'))) return;
+    var pct=v.totalCells?Math.round(v.filledCells*100/v.totalCells):0;
+    if(!confirm(t('completeness')+': '+pct+'%\n'+v.warnings.length+' '+t('warnings')+'\n\n'+t('download_q'))) return;
   }
   var rng=getDateRange();
   if(ST.gps && rng){
@@ -5931,6 +5971,7 @@ function downloadCSV(){
 /* ===== Phase 5: PowerPoint export (PptxGenJS) ===== */
 function downloadPPTX(){
   if(typeof PptxGenJS==='undefined'){ toast(t('pptx_missing'),true); return; }
+  if(typeof agroCheckAndMigrateOrphanData==='function') agroCheckAndMigrateOrphanData();
   try{ FBLog.reset(); FBLog.mark('pptx_total'); FBLog.add('pptx_start','begin'); }catch(e){}
   fbProg(t('prog_pptx_start'), 5, '📽');
   var rng=getDateRange();
@@ -6178,9 +6219,11 @@ function preparePhotos(photos, cb){
 
 function downloadXLSX(){
   if(typeof XLSX==='undefined'){ toast(t('sheetjs_missing'),true); return; }
+  if(typeof agroCheckAndMigrateOrphanData==='function') agroCheckAndMigrateOrphanData();
   var v=buildValidation(); renderValRpt(v);
   if(v.warnings.length){
-    if(!confirm(t('completeness')+': '+Math.round(v.filledCells*100/v.totalCells)+'%\n'+v.warnings.length+' '+t('warnings')+'\n\n'+t('download_q'))) return;
+    var pct=v.totalCells?Math.round(v.filledCells*100/v.totalCells):0;
+    if(!confirm(t('completeness')+': '+pct+'%\n'+v.warnings.length+' '+t('warnings')+'\n\n'+t('download_q'))) return;
   }
   var rng=getDateRange();
   function build(wxDays){
@@ -6794,6 +6837,7 @@ function refreshAll(){
   document.getElementById('s_proto').value=ST.proto||'';
   document.getElementById('s_trial').value=ST.trial||'';
   document.getElementById('s_crop').value=ST.crop||'';
+  if(typeof agroApplyCropField==='function') agroApplyCropField(isAgro());
   { var _sv=document.getElementById('s_variety'); if(_sv) _sv.value=ST.variety||''; }
   document.getElementById('s_product').value=ST.product||'';
   document.getElementById('s_pest').value=ST.pest||'';
@@ -7297,6 +7341,11 @@ var AGRO_I18N={
   agro_province_location:{en:"Province/Location",es419:"Provincia/Ubicación",pt:"Província/Local",zh:"省/位置",id:"Provinsi/Lokasi",vi:"Tỉnh/Địa điểm",fr:"Province/Emplacement",it:"Provincia/Posizione",de:"Provinz/Standort"},
   agro_trial_id:{en:"Trial ID",es419:"ID de ensayo",pt:"ID do ensaio",zh:"试验 ID",id:"ID Uji",vi:"Mã thử nghiệm",fr:"ID d'essai",it:"ID prova",de:"Versuch-ID"},
   agro_trial_id_ph:{en:"e.g. Vietnam_BacGiang_Durian_Bio-Stimulate_23_2026",es419:"e.g. Vietnam_BacGiang_Durian_Bio-Stimulate_23_2026",pt:"e.g. Vietnam_BacGiang_Durian_Bio-Stimulate_23_2026",zh:"e.g. Vietnam_BacGiang_Durian_Bio-Stimulate_23_2026",id:"e.g. Vietnam_BacGiang_Durian_Bio-Stimulate_23_2026",vi:"e.g. Vietnam_BacGiang_Durian_Bio-Stimulate_23_2026",fr:"e.g. Vietnam_BacGiang_Durian_Bio-Stimulate_23_2026",it:"e.g. Vietnam_BacGiang_Durian_Bio-Stimulate_23_2026",de:"e.g. Vietnam_BacGiang_Durian_Bio-Stimulate_23_2026"},
+  agro_trial_id_note:{en:"same ID as in Agronomy App",es419:"mismo ID que en Agronomy App",pt:"mesmo ID do Agronomy App",zh:"与农艺应用中的试验记录ID相同",id:"ID sama dengan di Agronomy App",vi:"cùng mã với Agronomy App",fr:"même ID que dans Agronomy App",it:"stesso ID di Agronomy App",de:"gleiche ID wie in Agronomy App"},
+  agro_no_headers_title:{en:"No Observation Headers Added",es419:"No se han agregado encabezados de observación",pt:"Nenhum cabeçalho de observação adicionado",zh:"未添加观察项表头",id:"Belum Ada Header Pengamatan Ditambahkan",vi:"Chưa thêm tiêu đề quan sát",fr:"Aucun en-tête d'observation ajouté",it:"Nessuna intestazione di osservazione aggiunta",de:"Keine Beobachtungskopfzeilen hinzugefügt"},
+  agro_no_headers_hint:{en:"Please select at least one KPI or KPM header in Setup > Observations before entering plot data.",es419:"Seleccione al menos un encabezado KPI o KPM en Configuración > Observaciones antes de ingresar datos.",pt:"Selecione pelo menos um cabeçalho KPI ou KPM em Configuração > Observações antes de inserir dados.",zh:"请先在“设置 > 观察项”中选择至少一个 KPI 或 KPM 表头，再录入数据。",id:"Silakan pilih setidaknya satu header KPI atau KPM di Pengaturan > Pengamatan sebelum memasukkan data.",vi:"Vui lòng chọn ít nhất một tiêu đề KPI hoặc KPM trong Cài đặt > Quan sát trước khi nhập dữ liệu.",fr:"Veuillez sélectionner au moins un en-tête KPI ou KPM dans Configuration > Observations avant de saisir des données.",it:"Seleziona almeno un'intestazione KPI o KPM in Impostazioni > Osservazioni prima di inserire i dati.",de:"Bitte wählen Sie unter Einrichtung > Beobachtungen mindestens eine KPI- oder KPM-Kopfzeile aus, bevor Sie Daten eingeben."},
+  agro_go_setup:{en:"Go to Setup",es419:"Ir a Configuración",pt:"Ir para Configuração",zh:"前往设置",id:"Buka Pengaturan",vi:"Đi đến Cài đặt",fr:"Aller à la configuration",it:"Vai a Impostazioni",de:"Zur Einrichtung"},
+  agro_no_headers_warn:{en:"No KPI or KPM headers added in Setup",es419:"No se agregaron encabezados KPI o KPM en Configuración",pt:"Nenhum cabeçalho KPI ou KPM adicionado na Configuração",zh:"设置中未添加 KPI 或 KPM 表头",id:"Tidak ada header KPI atau KPM yang ditambahkan di Pengaturan",vi:"Chưa thêm tiêu đề KPI hoặc KPM trong Cài đặt",fr:"Aucun en-tête KPI ou KPM ajouté dans la configuration",it:"Nessuna intestazione KPI o KPM aggiunta in Impostazioni",de:"Keine KPI- oder KPM-Kopfzeilen in der Einrichtung hinzugefügt"},
   agro_trial_no_note:{en:"Number sequentially: 001, 002, 003…",es419:"Numere secuencialmente: 001, 002, 003…",pt:"Numere sequencialmente: 001, 002, 003…",zh:"按顺序编号：001、002、003…",id:"Beri nomor berurutan: 001, 002, 003…",vi:"Đánh số tuần tự: 001, 002, 003…",fr:"Numérotez séquentiellement : 001, 002, 003…",it:"Numera in sequenza: 001, 002, 003…",de:"Fortlaufend nummerieren: 001, 002, 003…"},
   agro_trial_no_ph:{en:"e.g. 001",es419:"e.g. 001",pt:"e.g. 001",zh:"例如 001",id:"mis. 001",vi:"vd. 001",fr:"ex. 001",it:"es. 001",de:"z.B. 001"},
   agro_loc_ph:{en:"e.g. Bihar, Anhui, Victoria, etc",es419:"e.g. Bihar, Anhui, Victoria, etc",pt:"e.g. Bihar, Anhui, Victoria, etc",zh:"例如 Bihar, Anhui, Victoria 等",id:"mis. Bihar, Anhui, Victoria, dll",vi:"vd. Bihar, Anhui, Victoria, v.v.",fr:"ex. Bihar, Anhui, Victoria, etc",it:"es. Bihar, Anhui, Victoria, ecc",de:"z.B. Bihar, Anhui, Victoria usw."},
@@ -7402,9 +7451,17 @@ function agroSimplifyMeta(on){
       if(on){ protoInp.removeAttribute('data-i18n-ph'); protoInp.placeholder=at('agro_trial_id_ph'); }
       else  { protoInp.setAttribute('data-i18n-ph','ph_protocol'); try{ protoInp.placeholder=(typeof t==='function')?t('ph_protocol'):''; }catch(e){} }
     }
-    // Wave5 #4b: hide IFS proto note in Agronomy.
+    // Trial ID footnote (Agronomy vs IFS).
     var protoNote=document.getElementById('s_proto_note');
-    if(protoNote){ protoNote.style.display = on ? 'none' : ''; }
+    if(protoNote){
+      if(on){
+        protoNote.style.display = '';
+        protoNote.textContent = at('agro_trial_id_note');
+      } else {
+        protoNote.style.display = '';
+        protoNote.textContent = '(should be identical to Agronomy App Trial Record ID)';
+      }
+    }
     // Wave5 #5: Trial Number remark + placeholder (Agronomy).
     var trialNote=document.getElementById('s_trial_note');
     if(trialNote){
@@ -7522,22 +7579,104 @@ function agroPickerHtml(type,crop){
   list.forEach(function(it){ opts+='<option value="'+esc(it.h)+'">'+esc(it.h)+'</option>'; });
   opts+='<option value="__new__">'+at('agro_create_header')+'</option>';
   var addLbl=(type==='KPI')?at('agro_add_kpi'):at('agro_add_kpm');
-  return '<div class="agro-pick"><select id="agro_sel_'+type+'">'+opts+'</select>'+
+  return '<div class="agro-pick"><select id="agro_sel_'+type+'" onchange="agroAddHeader(\''+type+'\',this.value)">'+opts+'</select>'+
          '<button type="button" class="agro-addbtn" title="'+esc(addLbl)+'" onclick="agroAddHeader(\''+type+'\')">+</button></div>'+
          '<div class="agro-addlbl">'+addLbl+'</div>';
 }
 
 window.agroSetCrop=function(c){ ST.agroCrop=c; saveST(); agroRenderSetup(); };
 
-window.agroAddHeader=function(type){
-  var sel=document.getElementById('agro_sel_'+type); if(!sel) return;
-  var val=sel.value;
+function agroMigrateOrphanData(targetObs){
+  if(!targetObs || !ST || !ST.data) return;
+  var keysToCheck = ['', 'undefined', 'null'];
+  keysToCheck.forEach(function(k){
+    if(ST.data[k] && typeof ST.data[k]==='object' && Object.keys(ST.data[k]).length > 0){
+      if(!ST.data[targetObs] || typeof ST.data[targetObs]!=='object'){
+        ST.data[targetObs] = ST.data[k];
+      } else {
+        for(var tp in ST.data[k]){
+          if(!ST.data[targetObs][tp]){
+            ST.data[targetObs][tp] = ST.data[k][tp];
+          } else {
+            for(var pk in ST.data[k][tp]){
+              if(!ST.data[targetObs][tp][pk]){
+                ST.data[targetObs][tp][pk] = ST.data[k][tp][pk];
+              }
+            }
+          }
+        }
+      }
+      delete ST.data[k];
+    }
+  });
+}
+window.agroMigrateOrphanData = agroMigrateOrphanData;
+
+function agroDetectMaxSubs(obsKey){
+  var maxS = 1;
+  if(ST && ST.data && ST.data[obsKey]){
+    for(var tp in ST.data[obsKey]){
+      for(var pk in ST.data[obsKey][tp]){
+        var d = ST.data[obsKey][tp][pk];
+        if(d){
+          if(Array.isArray(d.values)) maxS = Math.max(maxS, d.values.length);
+          if(d.cols){
+            for(var c in d.cols){
+              if(Array.isArray(d.cols[c])) maxS = Math.max(maxS, d.cols[c].length);
+            }
+          }
+        }
+      }
+    }
+  }
+  return maxS;
+}
+
+function agroCheckAndMigrateOrphanData(){
+  if(!isAgro() || !ST || !ST.data) return;
+  var hasEmpty = (ST.data[''] && Object.keys(ST.data['']).length > 0) ||
+                 (ST.data['undefined'] && Object.keys(ST.data['undefined']).length > 0) ||
+                 (ST.data['null'] && Object.keys(ST.data['null']).length > 0);
+  if(!hasEmpty) return;
+  if(ST.obs && ST.obs.length > 0){
+    agroMigrateOrphanData(ST.obs[0]);
+    var detected = agroDetectMaxSubs(ST.obs[0]);
+    if(!ST.obsSubs[ST.obs[0]]) ST.obsSubs[ST.obs[0]] = detected;
+    saveST();
+  } else {
+    var crop = ST.agroCrop || 'Cereals';
+    var kpis = ((KPI_DATA[crop]||{}).KPI || []);
+    var fallbackHeader = (kpis[0] && kpis[0].h) ? kpis[0].h : 'Plant health';
+    ST.obs = [fallbackHeader];
+    ST.evalType = ST.evalType || {};
+    ST.evalType[fallbackHeader] = 'KPI';
+    ST.curObs = fallbackHeader;
+    agroMigrateOrphanData(fallbackHeader);
+    var detected = agroDetectMaxSubs(fallbackHeader);
+    ST.obsSubs = ST.obsSubs || {};
+    ST.obsSubs[fallbackHeader] = detected;
+    saveST();
+    if(typeof agroRenderSetup==='function') try{ agroRenderSetup(); }catch(e){}
+  }
+}
+window.agroCheckAndMigrateOrphanData = agroCheckAndMigrateOrphanData;
+
+window.agroAddHeader=function(type, chosenVal){
+  var sel=document.getElementById('agro_sel_'+type);
+  var val = (chosenVal !== undefined && chosenVal !== '') ? chosenVal : (sel ? sel.value : '');
   if(!val) return;
   if(val==='__new__'){
-    var nm=prompt(at('agro_new_header_prompt'),''); if(!nm) return; val=nm.trim(); if(!val) return;
+    var nm=prompt(at('agro_new_header_prompt'),'');
+    if(!nm){ if(sel) sel.value=''; return; }
+    val=nm.trim();
+    if(!val){ if(sel) sel.value=''; return; }
   }
   // header becomes an "observation"; tag its eval type
-  if(ST.obs.indexOf(val)>=0){ toast(at('agro_dup_header'),true); return; }
+  if(ST.obs.indexOf(val)>=0){
+    toast(at('agro_dup_header'),true);
+    if(sel) sel.value='';
+    return;
+  }
   ST.obs.push(val);
   ST.obsSubs[val]=ST.obsSubs[val]||5;
   ST.evalType[val]=type;
@@ -7546,9 +7685,16 @@ window.agroAddHeader=function(type){
   var found=((KPI_DATA[crop]||{})[type]||[]).filter(function(x){return x.h===val;})[0];
   ST.headerDesc[val]=found?found.d:'';
   if(!ST.curObs) ST.curObs=val;
+
+  // Migrate any orphan data recorded under "" or null
+  agroMigrateOrphanData(val);
+
   saveST();
   agroRenderSetup();
   if(typeof renderObsList==='function') try{renderObsList();}catch(e){}
+  if(typeof renderEntry==='function') try{renderEntry();}catch(e){}
+  if(typeof renderProgress==='function') try{renderProgress();}catch(e){}
+  if(typeof renderSummary==='function') try{renderSummary();}catch(e){}
   fbFlash&&fbFlash();
 };
 
@@ -7732,15 +7878,28 @@ function agroBuildAnalysisUI(){
     host=document.createElement('div'); host.id='agro_chart_host'; host.className='agro-only card';
     pg.insertBefore(host, pg.firstChild);
   }
+  if(typeof agroCheckAndMigrateOrphanData==='function') agroCheckAndMigrateOrphanData();
   var obsList=ST.obs.slice();
   var tps=(ST.tps&&ST.tps.length)?ST.tps:[''];
-  if(AGRO_CHART.tpIdx>=tps.length) AGRO_CHART.tpIdx=0;
-  if(AGRO_CHART.obsIdx>=obsList.length) AGRO_CHART.obsIdx=0;
+  if(ST.curObs && obsList.indexOf(ST.curObs)>=0){
+    AGRO_CHART.obsIdx=obsList.indexOf(ST.curObs);
+  } else if(AGRO_CHART.obsIdx>=obsList.length){
+    AGRO_CHART.obsIdx=0;
+  }
+  if(ST.curTp && tps.indexOf(ST.curTp)>=0){
+    AGRO_CHART.tpIdx=tps.indexOf(ST.curTp);
+  } else if(AGRO_CHART.tpIdx>=tps.length){
+    AGRO_CHART.tpIdx=0;
+  }
   var h='';
   h+='<div class="agro-ch-top"><b>'+at('agro_chart_title')+'</b></div>';
   h+='<label>'+at('agro_sel_obs')+'</label>';
-  h+='<select id="agro_ch_obs" onchange="agroChartSet(\'obs\',this.value)">'+
-     obsList.map(function(o,i){return '<option value="'+i+'"'+(i===AGRO_CHART.obsIdx?' selected':'')+'>'+esc(o)+(ST.evalType[o]?(' ['+ST.evalType[o]+']'):'')+'</option>';}).join('')+'</select>';
+  if(!obsList.length){
+    h+='<select id="agro_ch_obs" disabled><option value="">'+at('agro_pick_header')+'</option></select>';
+  } else {
+    h+='<select id="agro_ch_obs" onchange="agroChartSet(\'obs\',this.value)">'+
+       obsList.map(function(o,i){return '<option value="'+i+'"'+(i===AGRO_CHART.obsIdx?' selected':'')+'>'+esc(o)+(ST.evalType[o]?(' ['+ST.evalType[o]+']'):'')+'</option>';}).join('')+'</select>';
+  }
   /* Agronomy: Bar graph removed — Box plot only. Kind selector hidden. */
   h+='<div class="agro-ch-kind" style="display:none">'+
      '<button type="button" class="btn bb">'+at('agro_chart_box')+'</button>'+
@@ -7760,13 +7919,17 @@ function agroBuildAnalysisUI(){
 window.agroBuildAnalysisUI=agroBuildAnalysisUI;
 
 window.agroChartSet=function(what,val){
-  if(what==='obs') AGRO_CHART.obsIdx=parseInt(val)||0;
+  if(what==='obs'){
+    AGRO_CHART.obsIdx=parseInt(val)||0;
+    if(ST.obs[AGRO_CHART.obsIdx]) ST.curObs=ST.obs[AGRO_CHART.obsIdx];
+  }
   if(what==='kind') AGRO_CHART.kind=val;
-  agroBuildAnalysisUI();
+  agroDrawChart();
 };
 window.agroChartNav=function(dir){
   var tps=(ST.tps&&ST.tps.length)?ST.tps:[''];
   AGRO_CHART.tpIdx=(AGRO_CHART.tpIdx+dir+tps.length)%tps.length;
+  if(tps[AGRO_CHART.tpIdx]) ST.curTp=tps[AGRO_CHART.tpIdx];
   agroDrawChart();
 };
 window.agroSetFormula=function(v){ if(!ST.analysis) ST.analysis={}; ST.analysis.agroFormula=v; saveST(); agroDrawChart(); };
@@ -7795,8 +7958,11 @@ function agroSeries(){
     var d=ST.data[obs]&&ST.data[obs][tp]&&ST.data[obs][tp][p.key];
     var vals=[];
     if(d){
-      if(d.values){ d.values.forEach(function(v){ var n=parseFloat(v); if(!isNaN(n)) vals.push(n); }); }
-      if(d.cols){ for(var c in d.cols){ (d.cols[c]||[]).forEach(function(v){ var n=parseFloat(v); if(!isNaN(n)) vals.push(n); }); } }
+      if(d.cols && Object.keys(d.cols).length){
+        for(var c in d.cols){ (d.cols[c]||[]).forEach(function(v){ var n=parseFloat(v); if(!isNaN(n)) vals.push(n); }); }
+      } else if(d.values){
+        d.values.forEach(function(v){ var n=parseFloat(v); if(!isNaN(n)) vals.push(n); });
+      }
     }
     perTrt[p.trt].vals=perTrt[p.trt].vals.concat(vals);
   });
@@ -7984,6 +8150,7 @@ function agroInjectAbout(){
 /* boot */
 function boot(){
   agroInit();
+  agroCheckAndMigrateOrphanData();
   agroPatchHome();
   agroApplyMode();
   agroInjectAbout();
@@ -8013,6 +8180,7 @@ function agroApplyCropField(on){
         sel.onchange=function(){ agroOnCropSel(this.value); };
         if(host) wrap.insertBefore(sel, host);
       }
+      sel.style.display='';
       var cur=ST.crop||'';
       var isOther=agroIsOtherCrop(cur);
       var opts='<option value="">\u2014</option>';
@@ -8021,12 +8189,13 @@ function agroApplyCropField(on){
         opts+='<option value="'+c+'"'+selAttr+'>'+c+'</option>';
       });
       sel.innerHTML=opts;
+      sel.value = isOther ? 'Others' : cur;
       // Others free-text row
       if(!otherRow){
         otherRow=document.createElement('div'); otherRow.id=otherId; otherRow.className='vrow';
         otherRow.style.marginTop='6px';
         var oi=document.createElement('input'); oi.id='s_crop_other'; oi.placeholder=at('agro_crop_other_ph');
-        oi.oninput=function(){ ST.crop=this.value; saveST(); };
+        oi.oninput=function(){ ST.crop=this.value; var txt=document.getElementById('s_crop'); if(txt) txt.value=ST.crop; saveST(); };
         otherRow.appendChild(oi);
         wrap.insertBefore(otherRow, sel.nextSibling);
       }
@@ -8046,6 +8215,7 @@ window.agroOnCropSel=function(v){
   if(v==='Others'){
     if(otherRow) otherRow.style.display='';
     ST.crop=(oInp&&oInp.value)||'';
+    if(oInp) oInp.focus();
   } else {
     if(otherRow) otherRow.style.display='none';
     ST.crop=v;
